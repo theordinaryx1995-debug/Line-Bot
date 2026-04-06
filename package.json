@@ -1,7 +1,12 @@
 {
   "name": "line-bot",
   "version": "1.0.0",
+  "description": "LINE Messaging API bot on Render",
+  "main": "index.js",
   "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "node-fetch": "^3.3.2"
