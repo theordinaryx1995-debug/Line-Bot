@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(express.json());
 
-const TOKEN = "ใส่ token ใหม่";
+const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
 
 app.post("/webhook", async (req, res) => {
   const events = req.body.events;
