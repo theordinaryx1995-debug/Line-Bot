@@ -7,27 +7,37 @@ app.use(express.json());
 const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
 
 app.post("/webhook", async (req, res) => {
-  const events = req.body.events;
+  console.log("Webhook hit");
+  console.log(JSON.stringify(req.body));
+
+  const events = req.body.events || [];
 
   for (const e of events) {
     if (e.type !== "message" || e.message.type !== "text") continue;
 
-    await fetch("https://api.line.me/v2/bot/message/reply", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + TOKEN
-      },
-      body: JSON.stringify({
-        replyToken: e.replyToken,
-        messages: [
-          { type: "text", text: "คุณพิมพ์ว่า: " + e.message.text }
-        ]
-      })
-    });
+    try {
+      const response = await fetch("https://api.line.me/v2/bot/message/reply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + TOKEN
+        },
+        body: JSON.stringify({
+          replyToken: e.replyToken,
+          messages: [
+            { type: "text", text: "คุณพิมพ์ว่า: " + e.message.text }
+          ]
+        })
+      });
+
+      const text = await response.text();
+      console.log("Reply status:", response.status);
+      console.log("Reply body:", text);
+
+    } catch (err) {
+      console.error("Error:", err);
+    }
   }
 
   res.sendStatus(200);
 });
-
-app.listen(3000);
