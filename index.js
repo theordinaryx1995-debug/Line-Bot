@@ -5,16 +5,100 @@ const app = express();
 app.use(express.json());
 
 const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
+const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
 
 app.get("/", (req, res) => {
   res.status(200).send("Server is running");
 });
 
 app.get("/webhook", (req, res) => {
-  res
-    .status(200)
-    .send("Webhook endpoint is alive. LINE must use POST, not GET.");
+  res.status(200).send("Webhook endpoint is alive. Use POST from LINE only.");
 });
+
+async function loadPrices() {
+  const response = await fetch(SHEET_CSV_URL);
+  const csv = await response.text();
+
+  const lines = csv.trim().split("\n");
+  const priceTable = {};
+
+  for (let i = 1; i < lines.length; i++) {
+    const row = lines[i].split(",");
+    if (row.length < 2) continue;
+
+    const code = row[0].trim().replace(/"/g, "").toUpperCase();
+    const price = Number(row[1].trim().replace(/"/g, ""));
+
+    if (!code || Number.isNaN(price)) continue;
+    priceTable[code] = price;
+  }
+
+  return priceTable;
+}
+
+function normalizeCode(raw) {
+  if (!raw) return "";
+  return raw.trim().toUpperCase();
+}
+
+function parseItems(text) {
+  const parts = text.split("/");
+  const items = [];
+
+  for (let part of parts) {
+    const cleaned = part.trim();
+
+    // รองรับ:
+    // OP-13 2
+    // OP-13 x2
+    // OP-13 = 2
+    // PRB-01 3 กล่อง
+    const match = cleaned.match(/([A-Z]+-?\d+)[^\d]*(\d+)/i);
+    if (!match) continue;
+
+    const code = normalizeCode(match[1]);
+    const qty = parseInt(match[2], 10);
+
+    if (!code || Number.isNaN(qty) || qty <= 0) continue;
+
+    items.push({ code, qty });
+  }
+
+  return items;
+}
+
+async function calculate(text) {
+  const priceTable = await loadPrices();
+  const items = parseItems(text);
+
+  if (items.length === 0) {
+    return "พิมพ์เช่น OP-13 2 / OP-14 1";
+  }
+
+  let total = 0;
+  let result = "🧾 สรุปรายการ\n";
+
+  for (const item of items) {
+    if (!priceTable[item.code]) {
+      result += `${item.code} ❌ ไม่มีสินค้า\n`;
+      continue;
+    }
+
+    const subtotal = priceTable[item.code] * item.qty;
+    total += subtotal;
+
+    result += `${item.code} x${item.qty} = ${subtotal} บาท\n`;
+  }
+
+  if (total === 0) {
+    return "ไม่พบสินค้าที่คำนวณได้";
+  }
+
+  result += "-----------------\n";
+  result += `รวมทั้งหมด = ${total} บาท`;
+
+  return result;
+}
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -27,12 +111,14 @@ app.post("/webhook", async (req, res) => {
       if (e.type !== "message") continue;
       if (!e.message || e.message.type !== "text") continue;
 
+      const replyText = await calculate(e.message.text);
+
       const replyPayload = {
         replyToken: e.replyToken,
         messages: [
           {
             type: "text",
-            text: "คุณพิมพ์ว่า: " + e.message.text
+            text: replyText
           }
         ]
       };
