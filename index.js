@@ -48,11 +48,11 @@ function parseItems(text) {
   for (let part of parts) {
     const cleaned = part.trim();
 
-    // รองรับ:
+    // รองรับรูปแบบ เช่น:
     // OP-13 2
     // OP-13 x2
     // OP-13 = 2
-    // PRB-01 3 กล่อง
+    // prb-01 1
     const match = cleaned.match(/([A-Z]+-?\d+)[^\d]*(\d+)/i);
     if (!match) continue;
 
@@ -72,7 +72,7 @@ async function calculate(text) {
   const items = parseItems(text);
 
   if (items.length === 0) {
-    return "พิมพ์เช่น OP-13 2 / OP-14 1";
+    return "พิมพ์เช่น รวมราคา OP-13 2 / OP-14 1";
   }
 
   let total = 0;
@@ -111,7 +111,17 @@ app.post("/webhook", async (req, res) => {
       if (e.type !== "message") continue;
       if (!e.message || e.message.type !== "text") continue;
 
-      const replyText = await calculate(e.message.text);
+      const userText = e.message.text.trim().toUpperCase();
+
+      // ตอบเฉพาะข้อความที่มีคำว่า "รวมราคา"
+      if (!userText.includes("รวมราคา")) {
+        continue;
+      }
+
+      // ลบคำ trigger ออกก่อนคำนวณ
+      const cleanText = userText.replace("รวมราคา", "").trim();
+
+      const replyText = await calculate(cleanText);
 
       const replyPayload = {
         replyToken: e.replyToken,
