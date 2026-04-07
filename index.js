@@ -7,6 +7,9 @@ app.use(express.json());
 const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
 
+// ลิงก์รูป QR / รูปชำระเงิน ต้องเป็น public https
+const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
+
 app.get("/", (req, res) => {
   res.status(200).send("Server is running");
 });
@@ -47,12 +50,6 @@ function parseItems(text) {
 
   for (let part of parts) {
     const cleaned = part.trim();
-
-    // รองรับรูปแบบ เช่น:
-    // OP-13 2
-    // OP-13 x2
-    // OP-13 = 2
-    // prb-01 1
     const match = cleaned.match(/([A-Z]+-?\d+)[^\d]*(\d+)/i);
     if (!match) continue;
 
@@ -60,7 +57,6 @@ function parseItems(text) {
     const qty = parseInt(match[2], 10);
 
     if (!code || Number.isNaN(qty) || qty <= 0) continue;
-
     items.push({ code, qty });
   }
 
@@ -72,11 +68,11 @@ async function calculate(text) {
   const items = parseItems(text);
 
   if (items.length === 0) {
-    return "พิมพ์เช่น รวมราคา OP-13 2 / OP-14 1";
+    return null;
   }
 
   let total = 0;
-  let result = "🧾 สรุปรายการ\n";
+  let result = "สรุปรายการ\n";
 
   for (const item of items) {
     if (!priceTable[item.code]) {
@@ -91,13 +87,27 @@ async function calculate(text) {
   }
 
   if (total === 0) {
-    return "ไม่พบสินค้าที่คำนวณได้";
+    return null;
   }
 
-  result += "-----------------\n";
+  result += "\n";
   result += `รวมทั้งหมด = ${total} บาท`;
 
   return result;
+}
+
+function buildPaymentText() {
+  return `สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
+
+ชื่อบัญชี ปรัชญา สุดใจดี
+
+K-Bank 0503228092
+
+True Wallet 0982652650
+
+✨ ชำระแล้วโปรดแนบ Pay Slip การโอนทุกครั้ง ✨
+
+ขอบคุณนะครับ`;
 }
 
 app.post("/webhook", async (req, res) => {
@@ -113,22 +123,51 @@ app.post("/webhook", async (req, res) => {
 
       const userText = e.message.text.trim().toUpperCase();
 
-      // ตอบเฉพาะข้อความที่มีคำว่า "รวมราคา"
+      // ให้ทำงานเฉพาะเมื่อมีคำว่า "รวมราคา"
       if (!userText.includes("รวมราคา")) {
         continue;
       }
 
-      // ลบคำ trigger ออกก่อนคำนวณ
       const cleanText = userText.replace("รวมราคา", "").trim();
+      const summaryText = await calculate(cleanText);
 
-      const replyText = await calculate(cleanText);
+      if (!summaryText) {
+        await fetch("https://api.line.me/v2/bot/message/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + TOKEN
+          },
+          body: JSON.stringify({
+            replyToken: e.replyToken,
+            messages: [
+              {
+                type: "text",
+                text: "พิมพ์เช่น รวมราคา OP-13 2 / OP-14 1"
+              }
+            ]
+          })
+        });
+        continue;
+      }
+
+      const paymentText = buildPaymentText();
 
       const replyPayload = {
         replyToken: e.replyToken,
         messages: [
           {
             type: "text",
-            text: replyText
+            text: summaryText
+          },
+          {
+            type: "image",
+            originalContentUrl: PAYMENT_IMAGE_URL,
+            previewImageUrl: PAYMENT_IMAGE_URL
+          },
+          {
+            type: "text",
+            text: paymentText
           }
         ]
       };
