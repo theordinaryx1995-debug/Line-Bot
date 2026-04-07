@@ -68,7 +68,7 @@ async function calculate(text) {
   const items = parseItems(text);
 
   if (items.length === 0) {
-    return null;
+    return "พิมพ์เช่น รวมราคา OP-13 2 / OP-14 1";
   }
 
   let total = 0;
@@ -82,17 +82,14 @@ async function calculate(text) {
 
     const subtotal = priceTable[item.code] * item.qty;
     total += subtotal;
-
     result += `${item.code} x${item.qty} = ${subtotal} บาท\n`;
   }
 
   if (total === 0) {
-    return null;
+    return "ไม่พบสินค้าที่คำนวณได้";
   }
 
-  result += "\n";
-  result += `รวมทั้งหมด = ${total} บาท`;
-
+  result += "\nรวมทั้งหมด = " + total + " บาท";
   return result;
 }
 
@@ -110,6 +107,34 @@ True Wallet 0982652650
 ขอบคุณนะครับ`;
 }
 
+async function buildPriceMenu() {
+  const priceTable = await loadPrices();
+
+  const pack = [];
+  const box = [];
+
+  const codes = Object.keys(priceTable).sort();
+
+  for (const code of codes) {
+    const price = priceTable[code];
+
+    // box code ขึ้นต้นด้วย B เช่น BOP-13, BPRB-01, BEB-04
+    if (code.startsWith("B")) {
+      const displayCode = code.substring(1); // ตัด B ออกตอนแสดง
+      box.push(`${displayCode} ${price}`);
+    } else {
+      pack.push(`${code} ${price}`);
+    }
+  }
+
+  let result = "✨ ซอง ✨\n";
+  result += pack.join("\n");
+  result += "\n\n✨ Box ✨\n";
+  result += box.join("\n");
+
+  return result;
+}
+
 app.post("/webhook", async (req, res) => {
   try {
     console.log("Webhook hit");
@@ -123,67 +148,80 @@ app.post("/webhook", async (req, res) => {
 
       const userText = e.message.text.trim().toUpperCase();
 
-      // ให้ทำงานเฉพาะเมื่อมีคำว่า "รวมราคา"
-      if (!userText.includes("รวมราคา")) {
-        continue;
-      }
+      // 1) ถ้าพิมพ์ ราคา / เมนูราคา → ส่งตารางราคา
+      if (
+        userText === "ราคา" ||
+        userText === "เมนูราคา" ||
+        userText === "ราคาสินค้า"
+      ) {
+        const menuText = await buildPriceMenu();
 
-      const cleanText = userText.replace("รวมราคา", "").trim();
-      const summaryText = await calculate(cleanText);
+        const replyPayload = {
+          replyToken: e.replyToken,
+          messages: [
+            {
+              type: "text",
+              text: menuText
+            }
+          ]
+        };
 
-      if (!summaryText) {
-        await fetch("https://api.line.me/v2/bot/message/reply", {
+        const response = await fetch("https://api.line.me/v2/bot/message/reply", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: "Bearer " + TOKEN
           },
-          body: JSON.stringify({
-            replyToken: e.replyToken,
-            messages: [
-              {
-                type: "text",
-                text: "พิมพ์เช่น รวมราคา OP-13 2 / OP-14 1"
-              }
-            ]
-          })
+          body: JSON.stringify(replyPayload)
         });
+
+        console.log("Price menu reply status:", response.status);
+        console.log("Price menu reply body:", await response.text());
         continue;
       }
 
-      const paymentText = buildPaymentText();
+      // 2) ถ้าพิมพ์ รวมราคา ... → คำนวณยอด + ส่ง QR + ข้อความชำระเงิน
+      if (userText.includes("รวมราคา")) {
+        const cleanText = userText.replace("รวมราคา", "").trim();
+        const summaryText = await calculate(cleanText);
 
-      const replyPayload = {
-        replyToken: e.replyToken,
-        messages: [
-          {
-            type: "text",
-            text: summaryText
+        const paymentText = buildPaymentText();
+
+        const replyPayload = {
+          replyToken: e.replyToken,
+          messages: [
+            {
+              type: "text",
+              text: summaryText
+            },
+            {
+              type: "image",
+              originalContentUrl: PAYMENT_IMAGE_URL,
+              previewImageUrl: PAYMENT_IMAGE_URL
+            },
+            {
+              type: "text",
+              text: paymentText
+            }
+          ]
+        };
+
+        const response = await fetch("https://api.line.me/v2/bot/message/reply", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + TOKEN
           },
-          {
-            type: "image",
-            originalContentUrl: PAYMENT_IMAGE_URL,
-            previewImageUrl: PAYMENT_IMAGE_URL
-          },
-          {
-            type: "text",
-            text: paymentText
-          }
-        ]
-      };
+          body: JSON.stringify(replyPayload)
+        });
 
-      const response = await fetch("https://api.line.me/v2/bot/message/reply", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + TOKEN
-        },
-        body: JSON.stringify(replyPayload)
-      });
+        console.log("Summary reply status:", response.status);
+        console.log("Summary reply body:", await response.text());
+        continue;
+      }
 
-      const resultText = await response.text();
-      console.log("Reply status:", response.status);
-      console.log("Reply body:", resultText);
+      // ถ้าไม่เข้าเงื่อนไขไหน ไม่ต้องตอบ
+      continue;
     }
 
     return res.sendStatus(200);
