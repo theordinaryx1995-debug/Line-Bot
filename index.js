@@ -10,12 +10,6 @@ const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_C
 // ลิงก์รูป QR / รูปชำระเงิน ต้องเป็น public https
 const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
 
-// =========================
-// CONFIG
-// =========================
-const TOKEN = "ใส่_CHANNEL_ACCESS_TOKEN_ใหม่_ตรงนี้";
-const SHEET_CSV_URL = "ใส่_CSV_URL_จาก_Google_Sheet_ตรงนี้";
-const PAYMENT_IMAGE_URL = "https://your-domain.com/payslip.jpg";
 
 // =========================
 // BASIC ROUTES
