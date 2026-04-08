@@ -45,7 +45,7 @@ function displayUnit(unit) {
 }
 
 // =========================
-// LOAD PRICE TABLE FROM CSV
+// LOAD PRICES FROM SHEET CSV
 // =========================
 async function loadPrices() {
   const response = await fetch(SHEET_CSV_URL);
@@ -70,14 +70,18 @@ async function loadPrices() {
     };
   }
 
+  console.log("PRICE TABLE:", priceTable);
   return priceTable;
 }
 
 // =========================
-// PARSE USER TEXT
+// PARSE ITEMS
 // รองรับ:
-// รวมราคา OP-13 2 ซอง PRB01 1 box ส่งด่วน
-// รวมราคา op13 x2 pack op14 1 กล่อง
+// OP13 2 ซอง
+// OP-13 2 ซอง
+// op13 x2 ซอง
+// prb01 1 box
+// รวมราคา op13 2 ซอง prb01 1 box ส่งด่วน
 // =========================
 function parseItems(orderText) {
   const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|pack|กล่อง|box|บ็อก)/gi;
@@ -125,6 +129,7 @@ async function calculateOrder(text) {
   }
 
   const items = parseItems(orderText);
+  console.log("PARSED ITEMS:", items);
 
   if (items.length === 0) {
     return {
@@ -218,12 +223,10 @@ app.post("/webhook", async (req, res) => {
       const userText = e.message.text.trim();
       const orderResult = await calculateOrder(userText);
 
-      // ไม่ใช่คำสั่งรวมราคา ก็ไม่ต้องตอบ
       if (!orderResult) {
         continue;
       }
 
-      // ถ้ายังพิมพ์ไม่ครบ ไม่ส่ง QR
       if (orderResult.status === "invalid") {
         await replyLine(e.replyToken, [
           {
@@ -234,7 +237,6 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // ถ้ามีสรุปรายการ ค่อยส่งสรุป + ข้อความชำระ + QR
       if (orderResult.status === "success") {
         await replyLine(e.replyToken, [
           {
