@@ -12,131 +12,100 @@ const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-de
 
 
 // =========================
-// BASIC ROUTES
+// ROUTE
 // =========================
 app.get("/", (req, res) => {
-  res.status(200).send("Server is running");
+  res.send("Server is running");
 });
 
 app.get("/webhook", (req, res) => {
-  res.status(200).send("Webhook endpoint is alive");
+  res.send("Webhook OK");
 });
 
 // =========================
-// HELPERS
+// UTIL
 // =========================
 function formatBaht(num) {
   return Number(num).toLocaleString("en-US");
 }
 
-function normalizeProductCode(raw) {
-  return raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+function normalizeCode(code) {
+  return code.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
-function displayProductCode(code) {
-  const match = code.match(/^([A-Z]+)(\d+)$/);
-  if (!match) return code;
-  return `${match[1]}-${match[2]}`;
+function displayCode(code) {
+  const m = code.match(/^([A-Z]+)(\d+)$/);
+  return m ? `${m[1]}-${m[2]}` : code;
 }
 
 function displayUnit(unit) {
-  if (unit === "pack") return "ซอง";
-  if (unit === "box") return "กล่อง";
-  return "";
+  return unit === "pack" ? "ซอง" : "กล่อง";
 }
 
 // =========================
-// LOAD PRICES FROM SHEET CSV
-// คอลัมน์:
-// A = Code
-// B = Pack_price
-// C = Box_Price
+// LOAD CSV
 // =========================
 async function loadPrices() {
-  const response = await fetch(SHEET_CSV_URL);
-  const csv = await response.text();
-
-  console.log("CSV RAW:", csv);
+  const res = await fetch(SHEET_CSV_URL);
+  const csv = await res.text();
 
   const lines = csv.trim().split("\n");
-  const priceTable = {};
+  const table = {};
 
   for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
-    if (row.length < 3) continue;
-
-    const code = row[0].trim().replace(/"/g, "").toUpperCase();
-    const packPrice = Number(row[1].trim().replace(/"/g, ""));
-    const boxPrice = Number(row[2].trim().replace(/"/g, ""));
+    const [code, pack, box] = lines[i].split(",");
 
     if (!code) continue;
 
-    priceTable[code] = {
-      pack: Number.isNaN(packPrice) ? null : packPrice,
-      box: Number.isNaN(boxPrice) ? null : boxPrice
+    table[code.trim().toUpperCase()] = {
+      pack: Number(pack),
+      box: Number(box)
     };
   }
 
-  console.log("PRICE TABLE:", priceTable);
-  return priceTable;
+  console.log("PRICE TABLE:", table);
+  return table;
 }
 
 // =========================
-// BUILD PRICE LIST
-// สำหรับคำสั่ง "ราคาสินค้า"
+// SHOW PRICE LIST
 // =========================
-function buildPriceList(priceTable) {
-  const lines = ["📋 ราคาสินค้า"];
+function buildPriceList(table) {
+  let txt = "📋 ราคาสินค้า\n";
 
-  for (const code of Object.keys(priceTable)) {
-    const item = priceTable[code];
-    const displayCode = displayProductCode(code);
+  for (const code in table) {
+    const item = table[code];
 
-    let row = `${displayCode}`;
-
-    if (item.pack != null) {
-      row += ` | ซอง ${formatBaht(item.pack)} บาท`;
-    }
-
-    if (item.box != null) {
-      row += ` | กล่อง ${formatBaht(item.box)} บาท`;
-    }
-
-    lines.push(row);
+    txt += `${displayCode(code)} | ซอง ${formatBaht(item.pack)} บาท | กล่อง ${formatBaht(item.box)} บาท\n`;
   }
 
-  return lines.join("\n");
+  txt += `\nหากต้องการสรุปราคา พิมพ์เช่น\nOP13 2 ซอง OP15 2 ซอง\nหรือ\nOP13 1 กล่อง`;
+
+  return txt;
 }
 
 // =========================
-// PARSE ITEMS
+// PARSE
 // รองรับ:
 // OP13 2 ซอง
 // OP-13 2 ซอง
 // op13 x2 ซอง
 // prb01 1 box
-// รวมราคา op13 2 ซอง prb01 1 box ส่งด่วน
+// op13 2 ซอง op15 1 box ส่งด่วน
 // =========================
-function parseItems(orderText) {
-  const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|กล่อง|box|บ็อก)/gi;
+function parseItems(text) {
+  const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
   const items = [];
 
-  let match;
-  while ((match = regex.exec(orderText)) !== null) {
-    const rawCode = match[1];
-    const qty = parseInt(match[2], 10);
-    const rawUnit = match[3].toLowerCase();
-
-    let unit = null;
-    if (rawUnit === "ซอง" || rawUnit === "ซ็อง" || rawUnit === "pack") unit = "pack";
-    if (rawUnit === "กล่อง" || rawUnit === "box" || rawUnit === "บ็อก") unit = "box";
-
-    if (!unit || !qty || qty <= 0) continue;
-
+  let m;
+  while ((m = regex.exec(text))) {
     items.push({
-      code: normalizeProductCode(rawCode),
-      qty,
-      unit
+      code: normalizeCode(m[1]),
+      qty: Number(m[2]),
+      unit:
+        m[3].includes("ซอง") || m[3] === "pack" || m[3] === "ซ็อง"
+          ? "pack"
+          : "box"
     });
   }
 
@@ -144,100 +113,82 @@ function parseItems(orderText) {
 }
 
 // =========================
-// CALCULATE ORDER
+// CALCULATE
+// ไม่ต้องมีคำว่า "รวมราคา" แล้ว
+// ถ้าจับแพทเทิร์นสินค้าได้ ให้คำนวณเลย
 // =========================
-async function calculateOrder(text) {
-  const originalText = text.trim();
+async function calculate(text) {
+  const clean = text.trim();
 
-  if (!originalText.toLowerCase().startsWith("รวมราคา")) {
-    return null;
-  }
-
-  const orderText = originalText.replace(/^รวมราคา\s*/i, "").trim();
-
-  if (!orderText) {
-    return {
-      status: "invalid",
-      message: "พิมพ์เช่น รวมราคา OP-13 2 ซอง OP-14 1 box"
-    };
-  }
-
-  const items = parseItems(orderText);
+  const items = parseItems(clean);
   console.log("PARSED ITEMS:", items);
 
   if (items.length === 0) {
-    return {
-      status: "invalid",
-      message: "พิมพ์เช่น รวมราคา OP-13 2 ซอง OP-14 1 box"
-    };
+    return null;
   }
 
-  const priceTable = await loadPrices();
+  const table = await loadPrices();
 
   let total = 0;
-  let validCount = 0;
-  const resultLines = ["🧾 สรุปรายการ"];
+  let lines = ["🧾 สรุปรายการ"];
+  let valid = 0;
 
-  for (const item of items) {
-    const product = priceTable[item.code];
+  for (const i of items) {
+    const p = table[i.code];
 
-    if (!product) {
-      resultLines.push(`${displayProductCode(item.code)} ❌ ไม่มีสินค้า`);
+    if (!p) {
+      lines.push(`${displayCode(i.code)} ❌ ไม่มีสินค้า`);
       continue;
     }
 
-    const unitPrice = product[item.unit];
+    const price = p[i.unit];
 
-    if (unitPrice == null) {
-      resultLines.push(`${displayProductCode(item.code)} ❌ ไม่มีราคาประเภท${displayUnit(item.unit)}`);
+    if (!price) {
+      lines.push(`${displayCode(i.code)} ❌ ไม่มีราคาประเภท${displayUnit(i.unit)}`);
       continue;
     }
 
-    const subtotal = unitPrice * item.qty;
-    total += subtotal;
-    validCount++;
+    const sum = price * i.qty;
+    total += sum;
+    valid++;
 
-    resultLines.push(
-      `${displayProductCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(unitPrice)} x${item.qty} = ${formatBaht(subtotal)} บาท`
+    lines.push(
+      `${displayCode(i.code)} ${displayUnit(i.unit)}ละ ${formatBaht(price)} x${i.qty} = ${formatBaht(sum)} บาท`
     );
   }
 
-  if (validCount === 0) {
+  if (valid === 0) {
     return {
       status: "invalid",
-      message: "พิมพ์เช่น รวมราคา OP-13 2 ซอง OP-14 1 box"
+      message: "พิมพ์เช่น OP13 2 ซอง OP15 1 box"
     };
   }
 
-  resultLines.push("━━━━━━━━━━");
-  resultLines.push(`รวมทั้งหมด = ${formatBaht(total)} บาท`);
+  lines.push("━━━━━━━━━━");
+  lines.push(`รวมทั้งหมด = ${formatBaht(total)} บาท`);
 
   return {
     status: "success",
-    summaryText: resultLines.join("\n"),
-    paymentText: `📌 กรุณาโอนชำระจำนวน ${formatBaht(total)} บาท\nหลังโอนแล้วส่งสลิปในแชตนี้ได้เลย`
+    summary: lines.join("\n"),
+    payment: `📌 กรุณาโอน ${formatBaht(total)} บาท`
   };
 }
 
 // =========================
-// REPLY TO LINE
+// REPLY
 // =========================
-async function replyLine(replyToken, messages) {
-  const response = await fetch("https://api.line.me/v2/bot/message/reply", {
+async function reply(token, messages) {
+  await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: "Bearer " + TOKEN
     },
     body: JSON.stringify({
-      replyToken,
+      replyToken: token,
       messages
     })
   });
-
-  const resultText = await response.text();
-  console.log("Reply status:", response.status);
-  console.log("Reply body:", resultText);
 }
 
 // =========================
@@ -245,81 +196,72 @@ async function replyLine(replyToken, messages) {
 // =========================
 app.post("/webhook", async (req, res) => {
   try {
-    console.log("Webhook hit");
-    console.log(JSON.stringify(req.body));
-
     const events = req.body.events || [];
 
     for (const e of events) {
       if (e.type !== "message") continue;
-      if (!e.message || e.message.type !== "text") continue;
+      if (e.message.type !== "text") continue;
 
-      const userText = e.message.text.trim();
+      const text = e.message.text.trim();
 
-      // คำสั่งดูราคาสินค้า
-      if (userText === "ราคาสินค้า") {
-        const priceTable = await loadPrices();
-        const priceListText = buildPriceList(priceTable);
-
-        await replyLine(e.replyToken, [
-          {
-            type: "text",
-            text: priceListText
-          }
+      // 📋 ราคาสินค้า
+      if (text === "ราคาสินค้า") {
+        const table = await loadPrices();
+        await reply(e.replyToken, [
+          { type: "text", text: buildPriceList(table) }
         ]);
         continue;
       }
 
-      const orderResult = await calculateOrder(userText);
+      // 🧾 คำนวณอัตโนมัติ ถ้าจับแพทเทิร์นสินค้าได้
+      const result = await calculate(text);
 
-      // ไม่ใช่คำสั่งรวมราคา ก็ไม่ตอบ
-      if (!orderResult) {
-        continue;
-      }
+      // ถ้าไม่ใช่ข้อความรูปแบบสินค้า ก็ไม่ตอบ
+      if (!result) continue;
 
-      // ถ้ารูปแบบไม่ครบ ไม่ส่ง QR
-      if (orderResult.status === "invalid") {
-        await replyLine(e.replyToken, [
-          {
-            type: "text",
-            text: orderResult.message
-          }
+      if (result.status === "invalid") {
+        await reply(e.replyToken, [
+          { type: "text", text: result.message }
         ]);
         continue;
       }
 
-      // ถ้ามีสรุปรายการแล้ว ค่อยส่งข้อความสรุป + ข้อความชำระเงิน + รูป QR
-      if (orderResult.status === "success") {
-        await replyLine(e.replyToken, [
-          {
-            type: "text",
-            text: orderResult.summaryText
-          },
-          {
-            type: "text",
-            text: orderResult.paymentText
-          },
-          {
-            type: "image",
-            originalContentUrl: PAYMENT_IMAGE_URL,
-            previewImageUrl: PAYMENT_IMAGE_URL
-          }
-        ]);
-      }
+      // ✅ SUCCESS
+      await reply(e.replyToken, [
+        { type: "text", text: result.summary },
+        { type: "text", text: result.payment },
+        {
+          type: "image",
+          originalContentUrl: PAYMENT_IMAGE_URL,
+          previewImageUrl: PAYMENT_IMAGE_URL
+        },
+        {
+          type: "text",
+          text:
+`สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
+
+ชื่อบัญชี ปรัชญา สุดใจดี
+
+K-Bank 0503228092
+
+True Wallet 0982652650
+
+✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨
+
+ขอบคุณนะครับ`
+        }
+      ]);
     }
 
-    return res.sendStatus(200);
+    res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err);
-    return res.sendStatus(500);
+    console.error(err);
+    res.sendStatus(500);
   }
 });
 
 // =========================
-// START SERVER
+// START
 // =========================
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log("Running on " + PORT));
