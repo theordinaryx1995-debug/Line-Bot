@@ -3,7 +3,7 @@ import fetch from "node-fetch";
 import { google } from "googleapis";
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 // =========================
 // CONFIG
@@ -39,6 +39,11 @@ const CONFIG = {
     SPOT: {
       NAME: process.env.SPOT_SHEET_NAME || "ชีต3",
       GID: process.env.SPOT_SHEET_GID || "1276217956"
+    },
+
+    CAMPAIGN: {
+      NAME: process.env.CAMPAIGN_SHEET_NAME || "ชีต4",
+      GID: process.env.CAMPAIGN_SHEET_GID || "1706280606"
     }
   },
 
@@ -89,10 +94,15 @@ const sheets = hasGoogleSheetsWriteConfig
 const cache = {
   prices: { data: null, fetchedAt: 0 },
   stock: { data: null, fetchedAt: 0 },
-  spots: { data: null, fetchedAt: 0 }
+  spots: { data: null, fetchedAt: 0 },
+  campaign: { data: null, fetchedAt: 0 }
 };
 
 const bookingStates = new Map();
+// userId => { mode: "spot_booking", expiresAt }
+const paymentTracking = new Map();
+// userId => { displayName, qty, total, spotNumbers, expiresAt }
+
 let bookingQueue = Promise.resolve();
 
 // =========================
@@ -146,14 +156,6 @@ function getOrderGuideText() {
 OP13 2 ซอง OP15 2 ซอง
 หรือ
 OP13 1 กล่อง`;
-}
-
-function getSpotGuideText(available) {
-  return `🎯 ตอนนี้มีสปอตว่าง ${available} สปอต`;
-}
-
-function getSpotBookingPromptText() {
-  return "หากต้องการจองสปอต ให้พิมพ์จำนวนสปอตที่ต้องการจอง เช่น 2";
 }
 
 function chunkText(text, limit = CONFIG.SYSTEM.LINE_TEXT_LIMIT) {
@@ -249,6 +251,32 @@ function clearBookingState(userId) {
   bookingStates.delete(userId);
 }
 
+function setPaymentTracking(userId, payload) {
+  if (!userId) return;
+  paymentTracking.set(userId, {
+    ...payload,
+    expiresAt: Date.now() + CONFIG.SYSTEM.BOOKING_STATE_TTL_MS
+  });
+}
+
+function getPaymentTracking(userId) {
+  if (!userId) return null;
+  const item = paymentTracking.get(userId);
+  if (!item) return null;
+
+  if (Date.now() > item.expiresAt) {
+    paymentTracking.delete(userId);
+    return null;
+  }
+
+  return item;
+}
+
+function clearPaymentTracking(userId) {
+  if (!userId) return;
+  paymentTracking.delete(userId);
+}
+
 async function enqueueBooking(task) {
   const run = bookingQueue.then(task, task);
   bookingQueue = run.catch(() => {});
@@ -318,7 +346,6 @@ async function updateSheetValuesBatch(data) {
 async function loadPrices(forceRefresh = false) {
   const age = Date.now() - cache.prices.fetchedAt;
   if (!forceRefresh && cache.prices.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
-    logInfo("Using cached prices");
     return cache.prices.data;
   }
 
@@ -345,16 +372,7 @@ async function loadPrices(forceRefresh = false) {
     };
   }
 
-  if (Object.keys(table).length === 0) {
-    throw new Error("Price table parsed but empty");
-  }
-
-  cache.prices = {
-    data: table,
-    fetchedAt: Date.now()
-  };
-
-  logInfo("Loaded prices:", Object.keys(table).length, "items");
+  cache.prices = { data: table, fetchedAt: Date.now() };
   return table;
 }
 
@@ -364,7 +382,6 @@ async function loadPrices(forceRefresh = false) {
 async function loadStock(forceRefresh = false) {
   const age = Date.now() - cache.stock.fetchedAt;
   if (!forceRefresh && cache.stock.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
-    logInfo("Using cached stock");
     return cache.stock.data;
   }
 
@@ -389,32 +406,23 @@ async function loadStock(forceRefresh = false) {
     stock[model][category] = Number.isNaN(qty) ? 0 : qty;
   }
 
-  if (Object.keys(stock).length === 0) {
-    throw new Error("Stock table parsed but empty");
-  }
-
-  cache.stock = {
-    data: stock,
-    fetchedAt: Date.now()
-  };
-
-  logInfo("Loaded stock:", Object.keys(stock).length, "models");
+  cache.stock = { data: stock, fetchedAt: Date.now() };
   return stock;
 }
 
 // =========================
-// LOAD SPOT SHEET
+// LOAD SPOT SHEET (ชีต3)
 // A = number
 // B = Name
+// C = ชำระ
 // =========================
 async function loadSpotSheet(forceRefresh = false) {
   const age = Date.now() - cache.spots.fetchedAt;
   if (!forceRefresh && cache.spots.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
-    logInfo("Using cached spots");
     return cache.spots.data;
   }
 
-  const rows = await getSheetValues(`${CONFIG.SHEETS.SPOT.NAME}!A:B`);
+  const rows = await getSheetValues(`${CONFIG.SHEETS.SPOT.NAME}!A:C`);
 
   if (rows.length < 2) {
     throw new Error("Spot sheet has no data rows");
@@ -426,6 +434,7 @@ async function loadSpotSheet(forceRefresh = false) {
     const row = rows[i];
     const spotNumber = String(row[0] || "").trim();
     const name = String(row[1] || "").trim();
+    const paymentStatus = String(row[2] || "").trim();
 
     if (!spotNumber) continue;
 
@@ -433,7 +442,8 @@ async function loadSpotSheet(forceRefresh = false) {
       rowNumber: i + 1,
       spotNumber,
       sortNumber: Number(spotNumber),
-      name
+      name,
+      paymentStatus
     });
   }
 
@@ -443,15 +453,38 @@ async function loadSpotSheet(forceRefresh = false) {
     return aNum - bNum;
   });
 
-  cache.spots = {
-    data: spots,
-    fetchedAt: Date.now()
-  };
-
-  logInfo("Loaded spots:", spots.length, "rows");
+  cache.spots = { data: spots, fetchedAt: Date.now() };
   return spots;
 }
 
+// =========================
+// LOAD CAMPAIGN SHEET (ชีต4)
+// A2 = หัวเรื่อง
+// B2 = ราคา
+// C2 = รูป (ควรเป็น public image URL)
+// =========================
+async function loadCampaign(forceRefresh = false) {
+  const age = Date.now() - cache.campaign.fetchedAt;
+  if (!forceRefresh && cache.campaign.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
+    return cache.campaign.data;
+  }
+
+  const rows = await getSheetValues(`${CONFIG.SHEETS.CAMPAIGN.NAME}!A2:C2`);
+  const row = rows[0] || [];
+
+  const campaign = {
+    title: String(row[0] || "").trim(),
+    price: Number(String(row[1] || "").replace(/,/g, "")) || 0,
+    imageUrl: String(row[2] || "").trim()
+  };
+
+  cache.campaign = { data: campaign, fetchedAt: Date.now() };
+  return campaign;
+}
+
+// =========================
+// SPOT HELPERS
+// =========================
 function getAvailableSpots(spots) {
   return spots.filter((spot) => !spot.name);
 }
@@ -472,16 +505,30 @@ function buildBookedSpotsText(spots) {
   return lines.join("\n");
 }
 
+function buildAllBookedSpotsText(spots) {
+  const booked = spots.filter((spot) => spot.name);
+
+  if (booked.length === 0) {
+    return "ตอนนี้ยังไม่มีผู้จอง";
+  }
+
+  const lines = ["📌 รายชื่อผู้จองทั้งหมด"];
+
+  for (const spot of booked) {
+    const status = spot.paymentStatus ? ` (${spot.paymentStatus})` : "";
+    lines.push(`สปอต ${spot.spotNumber}: ${spot.name}${status}`);
+  }
+
+  return lines.join("\n");
+}
+
 async function reserveSpots({ qty, displayName }) {
   return enqueueBooking(async () => {
     const spots = await loadSpotSheet(true);
     const availableSpots = getAvailableSpots(spots);
 
     if (availableSpots.length === 0) {
-      return {
-        ok: false,
-        message: "สปอตเต็ม"
-      };
+      return { ok: false, message: "สปอตเต็ม" };
     }
 
     if (availableSpots.length < qty) {
@@ -493,24 +540,73 @@ async function reserveSpots({ qty, displayName }) {
 
     const selectedSpots = availableSpots.slice(0, qty);
 
-    const updates = selectedSpots.map((spot) => ({
-      range: `${CONFIG.SHEETS.SPOT.NAME}!B${spot.rowNumber}`,
-      values: [[displayName]]
-    }));
+    const updates = [];
+    for (const spot of selectedSpots) {
+      updates.push({
+        range: `${CONFIG.SHEETS.SPOT.NAME}!B${spot.rowNumber}`,
+        values: [[displayName]]
+      });
+      updates.push({
+        range: `${CONFIG.SHEETS.SPOT.NAME}!C${spot.rowNumber}`,
+        values: [["รอชำระ"]]
+      });
+    }
 
     await updateSheetValuesBatch(updates);
-    await loadSpotSheet(true);
+    const refreshed = await loadSpotSheet(true);
 
     return {
       ok: true,
-      spots: selectedSpots.map((spot) => String(spot.spotNumber))
+      spots: selectedSpots.map((spot) => String(spot.spotNumber)),
+      allBookedText: buildAllBookedSpotsText(refreshed)
     };
   });
+}
+
+async function markLatestBookingAsSlipSent(displayName) {
+  const spots = await loadSpotSheet(true);
+
+  const rowsToUpdate = spots
+    .filter(
+      (spot) =>
+        spot.name === displayName &&
+        (!spot.paymentStatus || spot.paymentStatus === "รอชำระ")
+    )
+    .map((spot) => spot.rowNumber);
+
+  if (rowsToUpdate.length === 0) {
+    return { ok: false, message: "ไม่พบรายการรอชำระของลูกค้า" };
+  }
+
+  const updates = rowsToUpdate.map((rowNumber) => ({
+    range: `${CONFIG.SHEETS.SPOT.NAME}!C${rowNumber}`,
+    values: [["ส่งสลิปแล้ว"]]
+  }));
+
+  await updateSheetValuesBatch(updates);
+  return { ok: true, count: rowsToUpdate.length };
 }
 
 // =========================
 // DISPLAY HELPERS
 // =========================
+function buildCampaignIntroText(campaign) {
+  const lines = [];
+
+  if (campaign.title) {
+    lines.push(`🎯 รายการจองปัจจุบัน`);
+    lines.push(campaign.title);
+  } else {
+    lines.push("🎯 ระบบจองสปอตสุ่ม");
+  }
+
+  if (campaign.price > 0) {
+    lines.push(`💰 ราคา / สปอต: ${formatBaht(campaign.price)} บาท`);
+  }
+
+  return lines.join("\n");
+}
+
 function buildPriceList(table) {
   const codes = Object.keys(table).sort();
   const lines = ["📋 ราคาสินค้า"];
@@ -600,8 +696,6 @@ async function calculate(text) {
   clean = clean.replace(/^รวมราคา/i, "").trim();
 
   const items = parseItems(clean);
-  logInfo("PARSED ITEMS:", items);
-
   if (items.length === 0) return null;
 
   const table = await loadPrices();
@@ -691,8 +785,6 @@ async function reply(replyToken, messages) {
     })
     .slice(0, 5);
 
-  logInfo("Replying with", safeMessages.length, "message(s)");
-
   const res = await withTimeout(
     fetch("https://api.line.me/v2/bot/message/reply", {
       method: "POST",
@@ -712,8 +804,6 @@ async function reply(replyToken, messages) {
   if (!res.ok) {
     throw new Error(`LINE reply failed ${res.status}: ${body}`);
   }
-
-  logInfo("LINE reply success:", body);
 }
 
 // =========================
@@ -749,26 +839,53 @@ async function handleCheckRate(replyToken, text) {
 }
 
 async function handleSpotBookingStart(replyToken, userId) {
-  const spots = await loadSpotSheet(true);
+  const [spots, campaign] = await Promise.all([
+    loadSpotSheet(true),
+    loadCampaign(true)
+  ]);
+
   const availableCount = getAvailableSpots(spots).length;
   const bookedText = buildBookedSpotsText(spots);
+  const introText = buildCampaignIntroText(campaign);
+
+  const messages = [{ type: "text", text: introText }];
+
+  if (campaign.imageUrl) {
+    messages.push({
+      type: "image",
+      originalContentUrl: campaign.imageUrl,
+      previewImageUrl: campaign.imageUrl
+    });
+  }
+
+  messages.push({
+    type: "text",
+    text: `🎯 ตอนนี้มีสปอตว่าง ${availableCount} สปอต`
+  });
+
+  messages.push({
+    type: "text",
+    text: bookedText
+  });
 
   if (availableCount <= 0) {
     clearBookingState(userId);
-    await reply(replyToken, [
-      { type: "text", text: bookedText },
-      { type: "text", text: "สปอตเต็ม" }
-    ]);
+    messages.push({
+      type: "text",
+      text: "สปอตเต็ม"
+    });
+    await reply(replyToken, messages);
     return;
   }
 
   setBookingState(userId, "spot_booking");
 
-  await reply(replyToken, [
-    { type: "text", text: getSpotGuideText(availableCount) },
-    { type: "text", text: bookedText },
-    { type: "text", text: getSpotBookingPromptText() }
-  ]);
+  messages.push({
+    type: "text",
+    text: "หากต้องการจองสปอต ให้พิมพ์จำนวนสปอตที่ต้องการจอง เช่น 2"
+  });
+
+  await reply(replyToken, messages);
 }
 
 async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
@@ -781,8 +898,6 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     return;
   }
 
-  logInfo("Booking quantity received. userId =", userId, "qty =", qty);
-
   let displayName = "ลูกค้า";
 
   try {
@@ -794,8 +909,82 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     logError("Get profile error:", err.message);
   }
 
+  const campaign = await loadCampaign(true);
   const result = await reserveSpots({ qty, displayName });
   clearBookingState(userId);
+
+  if (!result.ok) {
+    await reply(replyToken, [{ type: "text", text: result.message }]);
+    return;
+  }
+
+  const total = (campaign.price || 0) * qty;
+
+  if (userId) {
+    setPaymentTracking(userId, {
+      displayName,
+      qty,
+      total,
+      spotNumbers: result.spots
+    });
+  }
+
+  await reply(replyToken, [
+    {
+      type: "text",
+      text: `✅ จองสำเร็จ ${qty} สปอต
+ชื่อ: ${displayName}
+หมายเลขสปอต: ${result.spots.join(", ")}`
+    },
+    {
+      type: "text",
+      text: result.allBookedText
+    },
+    {
+      type: "text",
+      text: `🧾 สรุปยอดชำระ
+${campaign.title || "รายการจองสปอต"}
+ราคา / สปอต: ${formatBaht(campaign.price)} บาท
+จำนวน: ${qty} สปอต
+รวมทั้งหมด: ${formatBaht(total)} บาท`
+    },
+    {
+      type: "image",
+      originalContentUrl: CONFIG.PAYMENT.IMAGE_URL,
+      previewImageUrl: CONFIG.PAYMENT.IMAGE_URL
+    },
+    {
+      type: "text",
+      text: `สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
+
+ชื่อบัญชี ปรัชญา สุดใจดี
+
+K-Bank 0503228092
+
+True Wallet 0982652650
+
+✨ ชำระแล้วโปรดส่ง Pay Slip การโอนในแชตนี้ ✨
+
+เมื่อคุณส่งรูปสลิป ระบบจะบันทึกสถานะเป็น "ส่งสลิปแล้ว" เพื่อรอตรวจสอบ`
+    }
+  ]);
+}
+
+async function handleSlipImage(replyToken, userId) {
+  const payment = getPaymentTracking(userId);
+
+  if (!payment) {
+    await reply(replyToken, [
+      {
+        type: "text",
+        text: "ได้รับรูปแล้ว แต่ไม่พบรายการจองล่าสุดที่รอชำระ กรุณาติดต่อแอดมินเพื่อตรวจสอบ"
+      }
+    ]);
+    return;
+  }
+
+  const result = await markLatestBookingAsSlipSent(payment.displayName);
+  clearPaymentTracking(userId);
 
   if (!result.ok) {
     await reply(replyToken, [{ type: "text", text: result.message }]);
@@ -805,9 +994,12 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
   await reply(replyToken, [
     {
       type: "text",
-      text: `✅ จองสำเร็จ ${qty} สปอต
-ชื่อ: ${displayName}
-หมายเลขสปอต: ${result.spots.join(", ")}`
+      text: `📩 ได้รับรูปสลิปแล้ว
+ชื่อ: ${payment.displayName}
+จำนวนสปอต: ${payment.qty}
+หมายเลขสปอต: ${payment.spotNumbers.join(", ")}
+
+ระบบได้อัปเดตสถานะเป็น "ส่งสลิปแล้ว" เรียบร้อย กรุณารอแอดมินตรวจสอบ`
     }
   ]);
 }
@@ -871,32 +1063,22 @@ app.get("/", (req, res) => {
 
 app.get("/health", async (req, res) => {
   try {
-    const [prices, stock] = await Promise.all([loadPrices(), loadStock()]);
+    const [prices, stock, spots, campaign] = await Promise.all([
+      loadPrices(),
+      loadStock(),
+      loadSpotSheet(true),
+      loadCampaign(true)
+    ]);
 
-    const payload = {
+    res.status(200).json({
       ok: true,
       priceItems: Object.keys(prices).length,
       stockModels: Object.keys(stock).length,
-      cache: {
-        pricesAgeMs: Date.now() - cache.prices.fetchedAt,
-        stockAgeMs: Date.now() - cache.stock.fetchedAt
-      },
+      totalSpots: spots.length,
+      availableSpots: getAvailableSpots(spots).length,
       bookingEnabled: hasGoogleSheetsWriteConfig,
-      sheets: {
-        priceGid: CONFIG.SHEETS.PRICE.GID,
-        stockGid: CONFIG.SHEETS.STOCK.GID,
-        spotGid: CONFIG.SHEETS.SPOT.GID
-      }
-    };
-
-    if (hasGoogleSheetsWriteConfig) {
-      const spots = await loadSpotSheet(true);
-      payload.totalSpots = spots.length;
-      payload.availableSpots = getAvailableSpots(spots).length;
-      payload.cache.spotsAgeMs = Date.now() - cache.spots.fetchedAt;
-    }
-
-    res.status(200).json(payload);
+      campaign
+    });
   } catch (err) {
     logError("Health check error:", err);
     res.status(500).json({
@@ -914,35 +1096,43 @@ app.post("/webhook", async (req, res) => {
     for (const event of events) {
       try {
         if (event.type !== "message") continue;
-        if (!event.message || event.message.type !== "text") continue;
+        if (!event.message) continue;
 
-        const text = String(event.message.text || "").trim();
+        const replyToken = event.replyToken;
         const userId = event.source?.userId || "";
 
+        if (event.message.type === "image") {
+          await handleSlipImage(replyToken, userId);
+          continue;
+        }
+
+        if (event.message.type !== "text") continue;
+
+        const text = String(event.message.text || "").trim();
         logInfo("Incoming text:", text, "userId:", userId || "(empty)");
 
         if (text === "ราคาสินค้า") {
-          await handlePriceList(event.replyToken);
+          await handlePriceList(replyToken);
           continue;
         }
 
         if (/^check\s+rate/i.test(text)) {
-          await handleCheckRate(event.replyToken, text);
+          await handleCheckRate(replyToken, text);
           continue;
         }
 
         if (text === "จองสปอตสุ่ม") {
-          await handleSpotBookingStart(event.replyToken, userId);
+          await handleSpotBookingStart(replyToken, userId);
           continue;
         }
 
         const bookingState = getBookingState(userId);
         if (bookingState?.mode === "spot_booking" && isPositiveIntegerText(text)) {
-          await handleSpotBookingQuantity(event.replyToken, userId, text);
+          await handleSpotBookingQuantity(replyToken, userId, text);
           continue;
         }
 
-        const handled = await handleOrder(event.replyToken, text);
+        const handled = await handleOrder(replyToken, text);
         if (handled) continue;
       } catch (eventErr) {
         logError("Event handling error:", eventErr);
@@ -972,9 +1162,4 @@ app.post("/webhook", async (req, res) => {
 // =========================
 app.listen(CONFIG.PORT, () => {
   logInfo(`✅ Server running on port ${CONFIG.PORT}`);
-  logInfo("PRICE_CSV_URL =", CONFIG.SHEETS.PRICE.CSV_URL);
-  logInfo("STOCK_CSV_URL =", CONFIG.SHEETS.STOCK.CSV_URL);
-  logInfo("SPOT_SHEET_NAME =", CONFIG.SHEETS.SPOT.NAME);
-  logInfo("SPOT_SHEET_GID =", CONFIG.SHEETS.SPOT.GID);
-  logInfo("BOOKING_ENABLED =", hasGoogleSheetsWriteConfig);
 });
