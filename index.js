@@ -655,6 +655,10 @@ async function calculate(text) {
 // LINE HELPERS
 // =========================
 async function getLineProfile(userId) {
+  if (!userId) {
+    throw new Error("Missing userId");
+  }
+
   const res = await withTimeout(
     fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
       method: "GET",
@@ -777,8 +781,18 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     return;
   }
 
-  const profile = await getLineProfile(userId);
-  const displayName = profile.displayName || "ไม่ทราบชื่อ";
+  logInfo("Booking quantity received. userId =", userId, "qty =", qty);
+
+  let displayName = "ลูกค้า";
+
+  try {
+    if (userId) {
+      const profile = await getLineProfile(userId);
+      displayName = profile.displayName || "ลูกค้า";
+    }
+  } catch (err) {
+    logError("Get profile error:", err.message);
+  }
 
   const result = await reserveSpots({ qty, displayName });
   clearBookingState(userId);
@@ -905,7 +919,7 @@ app.post("/webhook", async (req, res) => {
         const text = String(event.message.text || "").trim();
         const userId = event.source?.userId || "";
 
-        logInfo("Incoming text:", text, "userId:", userId);
+        logInfo("Incoming text:", text, "userId:", userId || "(empty)");
 
         if (text === "ราคาสินค้า") {
           await handlePriceList(event.replyToken);
