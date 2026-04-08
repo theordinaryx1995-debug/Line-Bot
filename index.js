@@ -11,6 +11,13 @@ const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_C
 const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
 
 // =========================
+// CONFIG
+// =========================
+const TOKEN = "ใส่_CHANNEL_ACCESS_TOKEN_ใหม่_ตรงนี้";
+const SHEET_CSV_URL = "ใส่_CSV_URL_จาก_Google_Sheet_ตรงนี้";
+const PAYMENT_IMAGE_URL = "https://your-domain.com/payslip.jpg";
+
+// =========================
 // BASIC ROUTES
 // =========================
 app.get("/", (req, res) => {
@@ -78,6 +85,33 @@ async function loadPrices() {
 
   console.log("PRICE TABLE:", priceTable);
   return priceTable;
+}
+
+// =========================
+// BUILD PRICE LIST
+// สำหรับคำสั่ง "ราคาสินค้า"
+// =========================
+function buildPriceList(priceTable) {
+  const lines = ["📋 ราคาสินค้า"];
+
+  for (const code of Object.keys(priceTable)) {
+    const item = priceTable[code];
+    const displayCode = displayProductCode(code);
+
+    let row = `${displayCode}`;
+
+    if (item.pack != null) {
+      row += ` | ซอง ${formatBaht(item.pack)} บาท`;
+    }
+
+    if (item.box != null) {
+      row += ` | กล่อง ${formatBaht(item.box)} บาท`;
+    }
+
+    lines.push(row);
+  }
+
+  return lines.join("\n");
 }
 
 // =========================
@@ -227,12 +261,29 @@ app.post("/webhook", async (req, res) => {
       if (!e.message || e.message.type !== "text") continue;
 
       const userText = e.message.text.trim();
+
+      // คำสั่งดูราคาสินค้า
+      if (userText === "ราคาสินค้า") {
+        const priceTable = await loadPrices();
+        const priceListText = buildPriceList(priceTable);
+
+        await replyLine(e.replyToken, [
+          {
+            type: "text",
+            text: priceListText
+          }
+        ]);
+        continue;
+      }
+
       const orderResult = await calculateOrder(userText);
 
+      // ไม่ใช่คำสั่งรวมราคา ก็ไม่ตอบ
       if (!orderResult) {
         continue;
       }
 
+      // ถ้ารูปแบบไม่ครบ ไม่ส่ง QR
       if (orderResult.status === "invalid") {
         await replyLine(e.replyToken, [
           {
@@ -243,6 +294,7 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
+      // ถ้ามีสรุปรายการแล้ว ค่อยส่งข้อความสรุป + ข้อความชำระเงิน + รูป QR
       if (orderResult.status === "success") {
         await replyLine(e.replyToken, [
           {
