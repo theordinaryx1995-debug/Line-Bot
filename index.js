@@ -5,25 +5,29 @@ const app = express();
 app.use(express.json());
 
 const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
+// Sheet 2 = Price list
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
+// Sheet 2 = stock carton
+const STOCK_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=262793173";
+
 
 // ลิงก์รูป QR / รูปชำระเงิน ต้องเป็น public https
 const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
 
 
 // =========================
-// ROUTE
+// ROUTES
 // =========================
 app.get("/", (req, res) => {
-  res.send("Server is running");
+  res.status(200).send("Server is running");
 });
 
 app.get("/webhook", (req, res) => {
-  res.send("Webhook OK");
+  res.status(200).send("Webhook OK");
 });
 
 // =========================
-// UTIL
+// HELPERS
 // =========================
 function formatBaht(num) {
   return Number(num).toLocaleString("en-US");
@@ -50,23 +54,34 @@ OP13 1 กล่อง`;
 }
 
 // =========================
-// LOAD CSV
+// LOAD PRICE CSV (Sheet1)
+// คอลัมน์:
+// A = Code
+// B = Pack_price
+// C = Box_Price
 // =========================
 async function loadPrices() {
-  const res = await fetch(SHEET_CSV_URL);
+  const res = await fetch(PRICE_CSV_URL);
   const csv = await res.text();
+
+  console.log("PRICE CSV RAW:", csv);
 
   const lines = csv.trim().split("\n");
   const table = {};
 
   for (let i = 1; i < lines.length; i++) {
-    const [code, pack, box] = lines[i].split(",");
+    const row = lines[i].split(",");
+    if (row.length < 3) continue;
+
+    const code = row[0].trim().replace(/"/g, "").toUpperCase();
+    const pack = Number(row[1].trim().replace(/"/g, ""));
+    const box = Number(row[2].trim().replace(/"/g, ""));
 
     if (!code) continue;
 
-    table[code.trim().toUpperCase()] = {
-      pack: Number(pack),
-      box: Number(box)
+    table[code] = {
+      pack: Number.isNaN(pack) ? null : pack,
+      box: Number.isNaN(box) ? null : box
     };
   }
 
@@ -75,14 +90,47 @@ async function loadPrices() {
 }
 
 // =========================
-// SHOW PRICE LIST
+// LOAD STOCK CSV (Sheet2)
+// คอลัมน์:
+// A = รุ่น
+// B = หมวด
+// C = เหลือ
+// =========================
+async function loadStock() {
+  const res = await fetch(STOCK_CSV_URL);
+  const csv = await res.text();
+
+  console.log("STOCK CSV RAW:", csv);
+
+  const lines = csv.trim().split("\n");
+  const stock = {};
+
+  for (let i = 1; i < lines.length; i++) {
+    const row = lines[i].split(",");
+    if (row.length < 3) continue;
+
+    const model = row[0].trim().replace(/"/g, "").toUpperCase();
+    const category = row[1].trim().replace(/"/g, "").toUpperCase();
+    const qty = Number(row[2].trim().replace(/"/g, ""));
+
+    if (!model || !category) continue;
+
+    if (!stock[model]) stock[model] = {};
+    stock[model][category] = Number.isNaN(qty) ? 0 : qty;
+  }
+
+  console.log("STOCK TABLE:", stock);
+  return stock;
+}
+
+// =========================
+// BUILD PRICE LIST
 // =========================
 function buildPriceList(table) {
   let txt = "📋 ราคาสินค้า\n";
 
   for (const code in table) {
     const item = table[code];
-
     txt += `${displayCode(code)} | ซอง ${formatBaht(item.pack)} บาท | กล่อง ${formatBaht(item.box)} บาท\n`;
   }
 
@@ -90,7 +138,29 @@ function buildPriceList(table) {
 }
 
 // =========================
-// PARSE
+// FORMAT STOCK
+// =========================
+function formatStock(model, data) {
+  const lines = [`📦 ${model} เหลือใน carton`];
+
+  for (const key of ["SP", "SEC", "LPA", "DON"]) {
+    if (data[key] !== undefined) {
+      const iText = "I ".repeat(data[key]).trim();
+      lines.push(`${key}: ${iText || "-"}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// =========================
+// PARSE ORDER ITEMS
+// รองรับ:
+// OP13 2 ซอง
+// OP-13 2 ซอง
+// op13 x2 ซอง
+// prb01 1 box
+// op13 2 ซอง op15 1 box ส่งด่วน
 // =========================
 function parseItems(text) {
   const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
@@ -112,10 +182,21 @@ function parseItems(text) {
 }
 
 // =========================
-// CALCULATE
+// CALCULATE ORDER
+// ไม่ต้องมีคำว่า "รวมราคา" ก็ได้
+// แต่ถ้าพิมพ์ "รวมราคา" อย่างเดียว จะตอบ guide
 // =========================
 async function calculate(text) {
-  const clean = text.trim();
+  let clean = text.trim();
+
+  if (clean === "รวมราคา") {
+    return {
+      status: "guide",
+      message: getOrderGuideText()
+    };
+  }
+
+  clean = clean.replace(/^รวมราคา/i, "").trim();
 
   const items = parseItems(clean);
   console.log("PARSED ITEMS:", items);
@@ -140,7 +221,7 @@ async function calculate(text) {
 
     const price = p[i.unit];
 
-    if (!price) {
+    if (price == null) {
       lines.push(`${displayCode(i.code)} ❌ ไม่มีราคาประเภท${displayUnit(i.unit)}`);
       continue;
     }
@@ -157,7 +238,7 @@ async function calculate(text) {
   if (valid === 0) {
     return {
       status: "invalid",
-      message: "พิมพ์เช่น OP13 2 ซอง OP15 2 ซอง หรือ OP13 1 กล่อง"
+      message: "พิมพ์เช่น OP13 2 ซอง OP15 1 box"
     };
   }
 
@@ -172,10 +253,10 @@ async function calculate(text) {
 }
 
 // =========================
-// REPLY
+// REPLY TO LINE
 // =========================
 async function reply(token, messages) {
-  await fetch("https://api.line.me/v2/bot/message/reply", {
+  const response = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -186,6 +267,10 @@ async function reply(token, messages) {
       messages
     })
   });
+
+  const result = await response.text();
+  console.log("Reply status:", response.status);
+  console.log("Reply body:", result);
 }
 
 // =========================
@@ -197,11 +282,11 @@ app.post("/webhook", async (req, res) => {
 
     for (const e of events) {
       if (e.type !== "message") continue;
-      if (e.message.type !== "text") continue;
+      if (!e.message || e.message.type !== "text") continue;
 
       const text = e.message.text.trim();
 
-      // 1) พิมพ์ "ราคาสินค้า"
+      // 1) ราคาสินค้า
       if (text === "ราคาสินค้า") {
         const table = await loadPrices();
 
@@ -212,18 +297,47 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // 2) พิมพ์ "รวมราคา" อย่างเดียว
-      if (text === "รวมราคา") {
+      // 2) Check rate
+      if (text.toLowerCase().startsWith("check rate")) {
+        const parts = text.split(" ");
+        const modelRaw = parts[2];
+
+        if (!modelRaw) {
+          await reply(e.replyToken, [
+            { type: "text", text: "พิมพ์เช่น Check rate OP14" }
+          ]);
+          continue;
+        }
+
+        const model = modelRaw.toUpperCase().replace("-", "");
+        const stock = await loadStock();
+
+        if (!stock[model]) {
+          await reply(e.replyToken, [
+            { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
+          ]);
+          continue;
+        }
+
+        const msg = formatStock(model, stock[model]);
+
         await reply(e.replyToken, [
-          { type: "text", text: getOrderGuideText() }
+          { type: "text", text: msg }
         ]);
         continue;
       }
 
-      // 3) คำนวณอัตโนมัติ ถ้าจับแพทเทิร์นสินค้าได้
+      // 3) รวมราคา / หรือพิมพ์รายการสินค้าเลย
       const result = await calculate(text);
 
       if (!result) continue;
+
+      if (result.status === "guide") {
+        await reply(e.replyToken, [
+          { type: "text", text: result.message }
+        ]);
+        continue;
+      }
 
       if (result.status === "invalid") {
         await reply(e.replyToken, [
@@ -261,7 +375,7 @@ True Wallet 0982652650
 
     res.sendStatus(200);
   } catch (err) {
-    console.error(err);
+    console.error("Webhook error:", err);
     res.sendStatus(500);
   }
 });
