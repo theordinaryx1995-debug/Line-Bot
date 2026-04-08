@@ -99,10 +99,7 @@ const cache = {
 };
 
 const bookingStates = new Map();
-// userId => { mode: "spot_booking", expiresAt }
 const paymentTracking = new Map();
-// userId => { displayName, qty, total, spotNumbers, expiresAt }
-
 let bookingQueue = Promise.resolve();
 
 // =========================
@@ -411,10 +408,7 @@ async function loadStock(forceRefresh = false) {
 }
 
 // =========================
-// LOAD SPOT SHEET (ชีต3)
-// A = number
-// B = Name
-// C = ชำระ
+// LOAD SPOT SHEET
 // =========================
 async function loadSpotSheet(forceRefresh = false) {
   const age = Date.now() - cache.spots.fetchedAt;
@@ -458,10 +452,7 @@ async function loadSpotSheet(forceRefresh = false) {
 }
 
 // =========================
-// LOAD CAMPAIGN SHEET (ชีต4)
-// A2 = หัวเรื่อง
-// B2 = ราคา
-// C2 = รูป (ควรเป็น public image URL)
+// LOAD CAMPAIGN SHEET
 // =========================
 async function loadCampaign(forceRefresh = false) {
   const age = Date.now() - cache.campaign.fetchedAt;
@@ -575,7 +566,7 @@ async function markLatestBookingAsSlipSent(displayName) {
     .map((spot) => spot.rowNumber);
 
   if (rowsToUpdate.length === 0) {
-    return { ok: false, message: "ไม่พบรายการรอชำระของลูกค้า" };
+    return { ok: false, message: "not_found" };
   }
 
   const updates = rowsToUpdate.map((rowNumber) => ({
@@ -594,7 +585,7 @@ function buildCampaignIntroText(campaign) {
   const lines = [];
 
   if (campaign.title) {
-    lines.push(`🎯 รายการจองปัจจุบัน`);
+    lines.push("🎯 รายการจองปัจจุบัน");
     lines.push(campaign.title);
   } else {
     lines.push("🎯 ระบบจองสปอตสุ่ม");
@@ -929,6 +920,7 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     });
   }
 
+  // ย้ายสรุปยอดไปล่างสุด
   await reply(replyToken, [
     {
       type: "text",
@@ -939,14 +931,6 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     {
       type: "text",
       text: result.allBookedText
-    },
-    {
-      type: "text",
-      text: `🧾 สรุปยอดชำระ
-${campaign.title || "รายการจองสปอต"}
-ราคา / สปอต: ${formatBaht(campaign.price)} บาท
-จำนวน: ${qty} สปอต
-รวมทั้งหมด: ${formatBaht(total)} บาท`
     },
     {
       type: "image",
@@ -966,6 +950,14 @@ True Wallet 0982652650
 ✨ ชำระแล้วโปรดส่ง Pay Slip การโอนในแชตนี้ ✨
 
 เมื่อคุณส่งรูปสลิป ระบบจะบันทึกสถานะเป็น "ส่งสลิปแล้ว" เพื่อรอตรวจสอบ`
+    },
+    {
+      type: "text",
+      text: `🧾 สรุปยอดชำระ
+${campaign.title || "รายการจองสปอต"}
+ราคา / สปอต: ${formatBaht(campaign.price)} บาท
+จำนวน: ${qty} สปอต
+รวมทั้งหมด: ${formatBaht(total)} บาท`
     }
   ]);
 }
@@ -973,11 +965,12 @@ True Wallet 0982652650
 async function handleSlipImage(replyToken, userId) {
   const payment = getPaymentTracking(userId);
 
+  // ถ้าไม่มี booking tracking ให้ตอบกลาง ๆ สำหรับการซื้อปกติ
   if (!payment) {
     await reply(replyToken, [
       {
         type: "text",
-        text: "ได้รับรูปแล้ว แต่ไม่พบรายการจองล่าสุดที่รอชำระ กรุณาติดต่อแอดมินเพื่อตรวจสอบ"
+        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
       }
     ]);
     return;
@@ -987,7 +980,12 @@ async function handleSlipImage(replyToken, userId) {
   clearPaymentTracking(userId);
 
   if (!result.ok) {
-    await reply(replyToken, [{ type: "text", text: result.message }]);
+    await reply(replyToken, [
+      {
+        type: "text",
+        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
+      }
+    ]);
     return;
   }
 
@@ -1020,8 +1018,8 @@ async function handleOrder(replyToken, text) {
   }
 
   if (result.status === "success") {
+    // ย้ายสรุปราคาไปล่างสุด
     await reply(replyToken, [
-      { type: "text", text: result.summary },
       { type: "text", text: result.payment },
       {
         type: "image",
@@ -1041,7 +1039,8 @@ True Wallet 0982652650
 ✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨
 
 ขอบคุณนะครับ`
-      }
+      },
+      { type: "text", text: result.summary }
     ]);
 
     return true;
