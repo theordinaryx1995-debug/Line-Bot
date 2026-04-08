@@ -46,10 +46,16 @@ function displayUnit(unit) {
 
 // =========================
 // LOAD PRICES FROM SHEET CSV
+// คอลัมน์:
+// A = Code
+// B = Pack_price
+// C = Box_Price
 // =========================
 async function loadPrices() {
   const response = await fetch(SHEET_CSV_URL);
   const csv = await response.text();
+
+  console.log("CSV RAW:", csv);
 
   const lines = csv.trim().split("\n");
   const priceTable = {};
@@ -84,7 +90,7 @@ async function loadPrices() {
 // รวมราคา op13 2 ซอง prb01 1 box ส่งด่วน
 // =========================
 function parseItems(orderText) {
-  const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|pack|กล่อง|box|บ็อก)/gi;
+  const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|กล่อง|box|บ็อก)/gi;
   const items = [];
 
   let match;
@@ -94,7 +100,7 @@ function parseItems(orderText) {
     const rawUnit = match[3].toLowerCase();
 
     let unit = null;
-    if (rawUnit === "ซอง" || rawUnit === "pack") unit = "pack";
+    if (rawUnit === "ซอง" || rawUnit === "ซ็อง" || rawUnit === "pack") unit = "pack";
     if (rawUnit === "กล่อง" || rawUnit === "box" || rawUnit === "บ็อก") unit = "box";
 
     if (!unit || !qty || qty <= 0) continue;
@@ -249,8 +255,8 @@ app.post("/webhook", async (req, res) => {
           },
           {
             type: "image",
-            originalContentUrl: PAYSLIP_IMAGE_URL,
-            previewImageUrl: PAYSLIP_IMAGE_URL
+            originalContentUrl: PAYMENT_IMAGE_URL,
+            previewImageUrl: PAYMENT_IMAGE_URL
           }
         ]);
       }
