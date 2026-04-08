@@ -2,44 +2,73 @@ import express from "express";
 import fetch from "node-fetch";
 
 const app = express();
-app.use(express.json());
-
-const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
-// Sheet 1 = Price list
-const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
-// Sheet 2 = stock carton
-const STOCK_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=262793173";
-
-
-// ลิงก์รูป QR / รูปชำระเงิน ต้องเป็น public https
-const PAYMENT_IMAGE_URL = "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
-
+app.use(express.json({ limit: "2mb" }));
 
 // =========================
-// ROUTES
+// ENV / CONFIG
 // =========================
-app.get("/", (req, res) => {
-  res.status(200).send("Server is running");
-});
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
 
-app.get("/webhook", (req, res) => {
-  res.status(200).send("Webhook OK");
-});
+if (!TOKEN) {
+  console.error("❌ Missing LINE_CHANNEL_ACCESS_TOKEN in environment variables");
+}
+
+const PRICE_CSV_URL =
+  process.env.PRICE_CSV_URL ||
+  "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
+
+const STOCK_CSV_URL =
+  process.env.STOCK_CSV_URL ||
+  "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=262793173";
+
+const PAYMENT_IMAGE_URL =
+  process.env.PAYMENT_IMAGE_URL ||
+  "https://raw.githubusercontent.com/theordinaryx1995-debug/Line-Bot/main/image-1824349084924438.jpg";
+
+const FETCH_TIMEOUT_MS = Number(process.env.FETCH_TIMEOUT_MS || 12000);
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 60 * 1000);
+const LINE_TEXT_LIMIT = 5000;
 
 // =========================
-// HELPERS
+// SIMPLE MEMORY CACHE
 // =========================
+const cache = {
+  prices: { data: null, fetchedAt: 0 },
+  stock: { data: null, fetchedAt: 0 }
+};
+
+// =========================
+// UTILITIES
+// =========================
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function logInfo(...args) {
+  console.log(`[${nowISO()}]`, ...args);
+}
+
+function logError(...args) {
+  console.error(`[${nowISO()}]`, ...args);
+}
+
 function formatBaht(num) {
-  return Number(num).toLocaleString("en-US");
+  const n = Number(num);
+  if (Number.isNaN(n)) return "-";
+  return n.toLocaleString("en-US");
 }
 
 function normalizeCode(code) {
-  return code.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return String(code || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
 }
 
 function displayCode(code) {
-  const m = code.match(/^([A-Z]+)(\d+)$/);
-  return m ? `${m[1]}-${m[2]}` : code;
+  const clean = normalizeCode(code);
+  const m = clean.match(/^([A-Z]+)(\d+)$/);
+  return m ? `${m[1]}-${m[2]}` : clean;
 }
 
 function displayUnit(unit) {
@@ -53,26 +82,117 @@ OP13 2 ซอง OP15 2 ซอง
 OP13 1 กล่อง`;
 }
 
+function chunkText(text, limit = LINE_TEXT_LIMIT) {
+  if (!text || text.length <= limit) return [text];
+
+  const chunks = [];
+  let remaining = text;
+
+  while (remaining.length > limit) {
+    let cut = remaining.lastIndexOf("\n", limit);
+    if (cut <= 0) cut = limit;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).trimStart();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout after ${ms} ms`)), ms)
+    )
+  ]);
+}
+
+// CSV parser รองรับ quote เบื้องต้น
+function parseCSVLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    const next = line[i + 1];
+
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === "," && !inQuotes) {
+      result.push(current);
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  result.push(current);
+  return result.map((x) => x.trim());
+}
+
+function parseCSV(csvText) {
+  return csvText
+    .replace(/\r/g, "")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map(parseCSVLine);
+}
+
+async function fetchText(url) {
+  logInfo("Fetching URL:", url);
+
+  const res = await withTimeout(fetch(url), FETCH_TIMEOUT_MS);
+  if (!res.ok) {
+    throw new Error(`Fetch failed ${res.status} ${res.statusText}`);
+  }
+
+  const text = await res.text();
+  if (!text || !text.trim()) {
+    throw new Error("Fetched empty response");
+  }
+
+  return text;
+}
+
 // =========================
-// LOAD PRICE CSV (Sheet1)
+// LOAD PRICES
+// Sheet1:
 // A = Code
 // B = Pack_price
-// C = Box_Price
+// C = Box_price
 // =========================
-async function loadPrices() {
-  const res = await fetch(PRICE_CSV_URL);
-  const csv = await res.text();
+async function loadPrices(forceRefresh = false) {
+  const age = Date.now() - cache.prices.fetchedAt;
+  if (!forceRefresh && cache.prices.data && age < CACHE_TTL_MS) {
+    logInfo("Using cached prices");
+    return cache.prices.data;
+  }
 
-  const lines = csv.trim().split("\n");
+  const csv = await fetchText(PRICE_CSV_URL);
+  const rows = parseCSV(csv);
+
+  if (rows.length < 2) {
+    throw new Error("Price sheet has no data rows");
+  }
+
   const table = {};
 
-  for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
-    if (row.length < 3) continue;
-
-    const code = row[0].trim().replace(/"/g, "").toUpperCase();
-    const pack = Number(row[1].trim().replace(/"/g, ""));
-    const box = Number(row[2].trim().replace(/"/g, ""));
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const code = normalizeCode(row[0] || "");
+    const pack = Number(String(row[1] || "").replace(/,/g, ""));
+    const box = Number(String(row[2] || "").replace(/,/g, ""));
 
     if (!code) continue;
 
@@ -82,30 +202,47 @@ async function loadPrices() {
     };
   }
 
-  console.log("PRICE TABLE:", table);
+  if (Object.keys(table).length === 0) {
+    throw new Error("Price table parsed but empty");
+  }
+
+  cache.prices = {
+    data: table,
+    fetchedAt: Date.now()
+  };
+
+  logInfo("Loaded prices:", Object.keys(table).length, "items");
   return table;
 }
 
 // =========================
-// LOAD STOCK CSV (Sheet2)
+// LOAD STOCK
+// Sheet2:
 // A = รุ่น
 // B = หมวด
 // C = เหลือ
 // =========================
-async function loadStock() {
-  const res = await fetch(STOCK_CSV_URL);
-  const csv = await res.text();
+async function loadStock(forceRefresh = false) {
+  const age = Date.now() - cache.stock.fetchedAt;
+  if (!forceRefresh && cache.stock.data && age < CACHE_TTL_MS) {
+    logInfo("Using cached stock");
+    return cache.stock.data;
+  }
 
-  const lines = csv.trim().split("\n");
+  const csv = await fetchText(STOCK_CSV_URL);
+  const rows = parseCSV(csv);
+
+  if (rows.length < 2) {
+    throw new Error("Stock sheet has no data rows");
+  }
+
   const stock = {};
 
-  for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
-    if (row.length < 3) continue;
-
-    const model = row[0].trim().replace(/"/g, "").toUpperCase();
-    const category = row[1].trim().replace(/"/g, "").toUpperCase();
-    const qty = Number(row[2].trim().replace(/"/g, ""));
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const model = normalizeCode(row[0] || "");
+    const category = String(row[1] || "").trim().toUpperCase();
+    const qty = Number(String(row[2] || "").replace(/,/g, ""));
 
     if (!model || !category) continue;
 
@@ -113,7 +250,16 @@ async function loadStock() {
     stock[model][category] = Number.isNaN(qty) ? 0 : qty;
   }
 
-  console.log("STOCK TABLE:", stock);
+  if (Object.keys(stock).length === 0) {
+    throw new Error("Stock table parsed but empty");
+  }
+
+  cache.stock = {
+    data: stock,
+    fetchedAt: Date.now()
+  };
+
+  logInfo("Loaded stock:", Object.keys(stock).length, "models");
   return stock;
 }
 
@@ -121,26 +267,36 @@ async function loadStock() {
 // BUILD PRICE LIST
 // =========================
 function buildPriceList(table) {
-  let txt = "📋 ราคาสินค้า\n";
+  const codes = Object.keys(table).sort();
+  const lines = ["📋 ราคาสินค้า"];
 
-  for (const code in table) {
+  for (const code of codes) {
     const item = table[code];
-    txt += `${displayCode(code)} | ซอง ${formatBaht(item.pack)} บาท | กล่อง ${formatBaht(item.box)} บาท\n`;
+    const packText = item.pack == null ? "-" : `${formatBaht(item.pack)} บาท`;
+    const boxText = item.box == null ? "-" : `${formatBaht(item.box)} บาท`;
+
+    lines.push(
+      `${displayCode(code)} | ซอง ${packText} | กล่อง ${boxText}`
+    );
   }
 
-  return txt.trim();
+  return lines.join("\n");
 }
 
 // =========================
-// FORMAT STOCK
+// STOCK FORMAT
 // =========================
+function qtyToBar(qty) {
+  const n = Number(qty) || 0;
+  return n > 0 ? "I ".repeat(n).trim() : "-";
+}
+
 function formatStock(model, data) {
-  const lines = [`📦 ${model} เหลือใน carton`];
+  const lines = [`📦 ${displayCode(model)} เหลือใน carton`];
 
   for (const key of ["SP", "SEC", "LPA", "DON"]) {
     if (data[key] !== undefined) {
-      const iText = "I ".repeat(data[key]).trim();
-      lines.push(`${key}: ${iText || "-"}`);
+      lines.push(`${key}: ${qtyToBar(data[key])}`);
     }
   }
 
@@ -148,21 +304,21 @@ function formatStock(model, data) {
 }
 
 function formatAllStock(stock) {
-  const messages = ["📦 สถานะสินค้าใน carton"];
+  const models = Object.keys(stock).sort();
+  const lines = ["📦 สถานะสินค้าใน carton"];
 
-  for (const model in stock) {
-    const data = stock[model];
-    messages.push(`\n${model}`);
+  for (const model of models) {
+    lines.push("");
+    lines.push(displayCode(model));
 
     for (const key of ["SP", "SEC", "LPA", "DON"]) {
-      if (data[key] !== undefined) {
-        const iText = "I ".repeat(data[key]).trim();
-        messages.push(`${key}: ${iText || "-"}`);
+      if (stock[model][key] !== undefined) {
+        lines.push(`${key}: ${qtyToBar(stock[model][key])}`);
       }
     }
   }
 
-  return messages.join("\n");
+  return lines.join("\n");
 }
 
 // =========================
@@ -174,16 +330,19 @@ function formatAllStock(stock) {
 // prb01 1 box
 // =========================
 function parseItems(text) {
-  const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
-  const items = [];
+  const regex =
+    /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
 
+  const items = [];
   let m;
+
   while ((m = regex.exec(text))) {
+    const unitWord = String(m[3] || "").toLowerCase();
     items.push({
       code: normalizeCode(m[1]),
       qty: Number(m[2]),
       unit:
-        m[3].includes("ซอง") || m[3] === "pack" || m[3] === "ซ็อง"
+        unitWord.includes("ซอง") || unitWord === "pack" || unitWord === "ซ็อง"
           ? "pack"
           : "box"
     });
@@ -196,7 +355,9 @@ function parseItems(text) {
 // CALCULATE ORDER
 // =========================
 async function calculate(text) {
-  let clean = text.trim();
+  let clean = String(text || "").trim();
+
+  if (!clean) return null;
 
   if (clean === "รวมราคา") {
     return {
@@ -208,7 +369,7 @@ async function calculate(text) {
   clean = clean.replace(/^รวมราคา/i, "").trim();
 
   const items = parseItems(clean);
-  console.log("PARSED ITEMS:", items);
+  logInfo("PARSED ITEMS:", items);
 
   if (items.length === 0) {
     return null;
@@ -217,30 +378,32 @@ async function calculate(text) {
   const table = await loadPrices();
 
   let total = 0;
-  let lines = ["🧾 สรุปรายการ"];
   let valid = 0;
+  const lines = ["🧾 สรุปรายการ"];
 
-  for (const i of items) {
-    const p = table[i.code];
+  for (const item of items) {
+    const priceData = table[item.code];
 
-    if (!p) {
-      lines.push(`${displayCode(i.code)} ❌ ไม่มีสินค้า`);
+    if (!priceData) {
+      lines.push(`${displayCode(item.code)} ❌ ไม่มีสินค้า`);
       continue;
     }
 
-    const price = p[i.unit];
+    const unitPrice = priceData[item.unit];
 
-    if (price == null) {
-      lines.push(`${displayCode(i.code)} ❌ ไม่มีราคาประเภท${displayUnit(i.unit)}`);
+    if (unitPrice == null) {
+      lines.push(
+        `${displayCode(item.code)} ❌ ไม่มีราคาประเภท${displayUnit(item.unit)}`
+      );
       continue;
     }
 
-    const sum = price * i.qty;
+    const sum = unitPrice * item.qty;
     total += sum;
     valid++;
 
     lines.push(
-      `${displayCode(i.code)} ${displayUnit(i.unit)}ละ ${formatBaht(price)} x${i.qty} = ${formatBaht(sum)} บาท`
+      `${displayCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(unitPrice)} x${item.qty} = ${formatBaht(sum)} บาท`
     );
   }
 
@@ -262,110 +425,110 @@ async function calculate(text) {
 }
 
 // =========================
-// REPLY TO LINE
+// LINE REPLY
 // =========================
-async function reply(token, messages) {
-  const response = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer " + TOKEN
-    },
-    body: JSON.stringify({
-      replyToken: token,
-      messages
+async function reply(replyToken, messages) {
+  const safeMessages = messages
+    .filter(Boolean)
+    .flatMap((msg) => {
+      if (msg.type === "text") {
+        return chunkText(msg.text).map((chunk) => ({
+          type: "text",
+          text: chunk
+        }));
+      }
+      return [msg];
     })
-  });
+    .slice(0, 5);
 
-  const result = await response.text();
-  console.log("Reply status:", response.status);
-  console.log("Reply body:", result);
+  logInfo("Replying with", safeMessages.length, "message(s)");
+
+  const res = await withTimeout(
+    fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${TOKEN}`
+      },
+      body: JSON.stringify({
+        replyToken,
+        messages: safeMessages
+      })
+    }),
+    FETCH_TIMEOUT_MS
+  );
+
+  const body = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`LINE reply failed ${res.status}: ${body}`);
+  }
+
+  logInfo("LINE reply success:", body);
 }
 
 // =========================
-// WEBHOOK
+// MESSAGE HANDLERS
 // =========================
-app.post("/webhook", async (req, res) => {
-  try {
-    const events = req.body.events || [];
+async function handlePriceList(replyToken) {
+  const table = await loadPrices();
+  await reply(replyToken, [
+    { type: "text", text: buildPriceList(table) },
+    { type: "text", text: getOrderGuideText() }
+  ]);
+}
 
-    for (const e of events) {
-      if (e.type !== "message") continue;
-      if (!e.message || e.message.type !== "text") continue;
+async function handleCheckRate(replyToken, text) {
+  const stock = await loadStock();
+  const parts = text.trim().split(/\s+/);
 
-      const text = e.message.text.trim();
+  // check rate
+  // check rate op13
+  const modelRaw = parts.slice(2).join("");
+  if (!modelRaw) {
+    await reply(replyToken, [{ type: "text", text: formatAllStock(stock) }]);
+    return;
+  }
 
-      // ราคาสินค้า
-      if (text === "ราคาสินค้า") {
-        const table = await loadPrices();
+  const model = normalizeCode(modelRaw);
 
-        await reply(e.replyToken, [
-          { type: "text", text: buildPriceList(table) },
-          { type: "text", text: getOrderGuideText() }
-        ]);
-        continue;
-      }
+  if (!stock[model]) {
+    await reply(replyToken, [{ type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }]);
+    return;
+  }
 
-      // Check rate ทั้งหมด หรือรายรุ่น
-      if (text.toLowerCase().startsWith("check rate")) {
-        const parts = text.split(" ");
-        const modelRaw = parts[2];
-        const stock = await loadStock();
+  await reply(replyToken, [
+    { type: "text", text: formatStock(model, stock[model]) }
+  ]);
+}
 
-        if (!modelRaw) {
-          await reply(e.replyToken, [
-            { type: "text", text: formatAllStock(stock) }
-          ]);
-          continue;
-        }
+async function handleOrder(replyToken, text) {
+  const result = await calculate(text);
 
-        const model = modelRaw.toUpperCase().replace("-", "");
+  if (!result) return false;
 
-        if (!stock[model]) {
-          await reply(e.replyToken, [
-            { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
-          ]);
-          continue;
-        }
+  if (result.status === "guide") {
+    await reply(replyToken, [{ type: "text", text: result.message }]);
+    return true;
+  }
 
-        await reply(e.replyToken, [
-          { type: "text", text: formatStock(model, stock[model]) }
-        ]);
-        continue;
-      }
+  if (result.status === "invalid") {
+    await reply(replyToken, [{ type: "text", text: result.message }]);
+    return true;
+  }
 
-      // รวมราคา / หรือพิมพ์รายการสินค้าเลย
-      const result = await calculate(text);
-
-      if (!result) continue;
-
-      if (result.status === "guide") {
-        await reply(e.replyToken, [
-          { type: "text", text: result.message }
-        ]);
-        continue;
-      }
-
-      if (result.status === "invalid") {
-        await reply(e.replyToken, [
-          { type: "text", text: result.message }
-        ]);
-        continue;
-      }
-
-      // SUCCESS
-      await reply(e.replyToken, [
-        { type: "text", text: result.summary },
-        { type: "text", text: result.payment },
-        {
-          type: "image",
-          originalContentUrl: PAYMENT_IMAGE_URL,
-          previewImageUrl: PAYMENT_IMAGE_URL
-        },
-        {
-          type: "text",
-          text:
-`สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
+  if (result.status === "success") {
+    await reply(replyToken, [
+      { type: "text", text: result.summary },
+      { type: "text", text: result.payment },
+      {
+        type: "image",
+        originalContentUrl: PAYMENT_IMAGE_URL,
+        previewImageUrl: PAYMENT_IMAGE_URL
+      },
+      {
+        type: "text",
+        text: `สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
 
 ชื่อบัญชี ปรัชญา สุดใจดี
 
@@ -376,13 +539,96 @@ True Wallet 0982652650
 ✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨
 
 ขอบคุณนะครับ`
+      }
+    ]);
+    return true;
+  }
+
+  return false;
+}
+
+// =========================
+// ROUTES
+// =========================
+app.get("/", (req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "line-webhook",
+    time: nowISO()
+  });
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    const [prices, stock] = await Promise.all([
+      loadPrices(),
+      loadStock()
+    ]);
+
+    res.status(200).json({
+      ok: true,
+      priceItems: Object.keys(prices).length,
+      stockModels: Object.keys(stock).length,
+      cache: {
+        pricesAgeMs: Date.now() - cache.prices.fetchedAt,
+        stockAgeMs: Date.now() - cache.stock.fetchedAt
+      }
+    });
+  } catch (err) {
+    logError("Health check error:", err);
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+app.post("/webhook", async (req, res) => {
+  try {
+    const events = req.body?.events || [];
+    logInfo("Webhook hit. events =", events.length);
+
+    for (const e of events) {
+      try {
+        if (e.type !== "message") continue;
+        if (!e.message || e.message.type !== "text") continue;
+
+        const text = String(e.message.text || "").trim();
+        logInfo("Incoming text:", text);
+
+        if (text === "ราคาสินค้า") {
+          await handlePriceList(e.replyToken);
+          continue;
         }
-      ]);
+
+        if (/^check\s+rate/i.test(text)) {
+          await handleCheckRate(e.replyToken, text);
+          continue;
+        }
+
+        const handled = await handleOrder(e.replyToken, text);
+        if (handled) continue;
+
+        // ไม่ตอบข้อความอื่น เพื่อไม่รบกวนแชต
+      } catch (eventErr) {
+        logError("Event handling error:", eventErr);
+
+        try {
+          await reply(e.replyToken, [
+            {
+              type: "text",
+              text: "ระบบเกิดข้อผิดพลาดชั่วคราว กรุณาลองใหม่อีกครั้ง"
+            }
+          ]);
+        } catch (replyErr) {
+          logError("Fallback reply failed:", replyErr);
+        }
+      }
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err);
+    logError("Webhook error:", err);
     res.sendStatus(500);
   }
 });
@@ -390,5 +636,8 @@ True Wallet 0982652650
 // =========================
 // START
 // =========================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Running on " + PORT));
+app.listen(PORT, () => {
+  logInfo(`✅ Server running on port ${PORT}`);
+  logInfo("PRICE_CSV_URL =", PRICE_CSV_URL);
+  logInfo("STOCK_CSV_URL =", STOCK_CSV_URL);
+});
