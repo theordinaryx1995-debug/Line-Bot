@@ -297,35 +297,71 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // 2) Check rate
-      if (text.toLowerCase().startsWith("check rate")) {
-        const parts = text.split(" ");
-        const modelRaw = parts[2];
+      // 🔍 Check rate (ใหม่)
+if (text.toLowerCase().startsWith("check rate")) {
 
-        if (!modelRaw) {
-          await reply(e.replyToken, [
-            { type: "text", text: "พิมพ์เช่น Check rate OP14" }
-          ]);
-          continue;
+  const parts = text.split(" ");
+  const modelRaw = parts[2];
+
+  const stock = await loadStock();
+
+  // =========================
+  // 🔹 CASE 1: ไม่มีรุ่น → แสดงทั้งหมด
+  // =========================
+  if (!modelRaw) {
+
+    let messages = ["📦 สถานะสินค้าใน carton"];
+
+    for (const model in stock) {
+      const data = stock[model];
+
+      messages.push(`\n${model}`);
+
+      for (const key of ["SP", "SEC", "LPA", "DON"]) {
+        if (data[key] !== undefined) {
+          const iText = "I ".repeat(data[key]).trim();
+          messages.push(`${key}: ${iText || "-"}`);
         }
-
-        const model = modelRaw.toUpperCase().replace("-", "");
-        const stock = await loadStock();
-
-        if (!stock[model]) {
-          await reply(e.replyToken, [
-            { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
-          ]);
-          continue;
-        }
-
-        const msg = formatStock(model, stock[model]);
-
-        await reply(e.replyToken, [
-          { type: "text", text: msg }
-        ]);
-        continue;
       }
+    }
+
+    await reply(e.replyToken, [
+      {
+        type: "text",
+        text: messages.join("\n")
+      }
+    ]);
+
+    continue;
+  }
+
+  // =========================
+  // 🔹 CASE 2: มีรุ่น → แสดงตัวเดียว
+  // =========================
+  const model = modelRaw.toUpperCase().replace("-", "");
+
+  if (!stock[model]) {
+    await reply(e.replyToken, [
+      { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
+    ]);
+    continue;
+  }
+
+  let lines = [`📦 ${model} เหลือใน carton`];
+
+  for (const key of ["SP", "SEC", "LPA", "DON"]) {
+    if (stock[model][key] !== undefined) {
+      const iText = "I ".repeat(stock[model][key]).trim();
+      lines.push(`${key}: ${iText || "-"}`);
+    }
+  }
+
+  await reply(e.replyToken, [
+    { type: "text", text: lines.join("\n") }
+  ]);
+
+  continue;
+}
 
       // 3) รวมราคา / หรือพิมพ์รายการสินค้าเลย
       const result = await calculate(text);
