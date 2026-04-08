@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 const TOKEN = "9RZmKVgzTnr75by2V6nzHyxxZsaIqt0h1v9FZ4OA8haa6fHrOLpJ/ocPI8PIQb3lxF2yTJo1Z3pWZOLtoX/kfa6c8ce5L/zwddp4420nRe+Al8bsVXFjjm3lkp17IGPIhQ/KRn61rl5bGxiv7pnvRgdB04t89/1O/w1cDnyilFU=";
-// Sheet 2 = Price list
+// Sheet 1 = Price list
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=0";
 // Sheet 2 = stock carton
 const STOCK_CSV_URL = "https://docs.google.com/spreadsheets/d/1BkjMteb8JN1RjOz_CmDoTgNBrA9wCIC1Y3bf4xQWMhc/export?format=csv&gid=262793173";
@@ -55,7 +55,6 @@ OP13 1 กล่อง`;
 
 // =========================
 // LOAD PRICE CSV (Sheet1)
-// คอลัมน์:
 // A = Code
 // B = Pack_price
 // C = Box_Price
@@ -63,8 +62,6 @@ OP13 1 กล่อง`;
 async function loadPrices() {
   const res = await fetch(PRICE_CSV_URL);
   const csv = await res.text();
-
-  console.log("PRICE CSV RAW:", csv);
 
   const lines = csv.trim().split("\n");
   const table = {};
@@ -91,7 +88,6 @@ async function loadPrices() {
 
 // =========================
 // LOAD STOCK CSV (Sheet2)
-// คอลัมน์:
 // A = รุ่น
 // B = หมวด
 // C = เหลือ
@@ -99,8 +95,6 @@ async function loadPrices() {
 async function loadStock() {
   const res = await fetch(STOCK_CSV_URL);
   const csv = await res.text();
-
-  console.log("STOCK CSV RAW:", csv);
 
   const lines = csv.trim().split("\n");
   const stock = {};
@@ -153,6 +147,24 @@ function formatStock(model, data) {
   return lines.join("\n");
 }
 
+function formatAllStock(stock) {
+  const messages = ["📦 สถานะสินค้าใน carton"];
+
+  for (const model in stock) {
+    const data = stock[model];
+    messages.push(`\n${model}`);
+
+    for (const key of ["SP", "SEC", "LPA", "DON"]) {
+      if (data[key] !== undefined) {
+        const iText = "I ".repeat(data[key]).trim();
+        messages.push(`${key}: ${iText || "-"}`);
+      }
+    }
+  }
+
+  return messages.join("\n");
+}
+
 // =========================
 // PARSE ORDER ITEMS
 // รองรับ:
@@ -160,7 +172,6 @@ function formatStock(model, data) {
 // OP-13 2 ซอง
 // op13 x2 ซอง
 // prb01 1 box
-// op13 2 ซอง op15 1 box ส่งด่วน
 // =========================
 function parseItems(text) {
   const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
@@ -183,8 +194,6 @@ function parseItems(text) {
 
 // =========================
 // CALCULATE ORDER
-// ไม่ต้องมีคำว่า "รวมราคา" ก็ได้
-// แต่ถ้าพิมพ์ "รวมราคา" อย่างเดียว จะตอบ guide
 // =========================
 async function calculate(text) {
   let clean = text.trim();
@@ -286,7 +295,7 @@ app.post("/webhook", async (req, res) => {
 
       const text = e.message.text.trim();
 
-      // 1) ราคาสินค้า
+      // ราคาสินค้า
       if (text === "ราคาสินค้า") {
         const table = await loadPrices();
 
@@ -297,73 +306,35 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // 🔍 Check rate (ใหม่)
-if (text.toLowerCase().startsWith("check rate")) {
+      // Check rate ทั้งหมด หรือรายรุ่น
+      if (text.toLowerCase().startsWith("check rate")) {
+        const parts = text.split(" ");
+        const modelRaw = parts[2];
+        const stock = await loadStock();
 
-  const parts = text.split(" ");
-  const modelRaw = parts[2];
-
-  const stock = await loadStock();
-
-  // =========================
-  // 🔹 CASE 1: ไม่มีรุ่น → แสดงทั้งหมด
-  // =========================
-  if (!modelRaw) {
-
-    let messages = ["📦 สถานะสินค้าใน carton"];
-
-    for (const model in stock) {
-      const data = stock[model];
-
-      messages.push(`\n${model}`);
-
-      for (const key of ["SP", "SEC", "LPA", "DON"]) {
-        if (data[key] !== undefined) {
-          const iText = "I ".repeat(data[key]).trim();
-          messages.push(`${key}: ${iText || "-"}`);
+        if (!modelRaw) {
+          await reply(e.replyToken, [
+            { type: "text", text: formatAllStock(stock) }
+          ]);
+          continue;
         }
+
+        const model = modelRaw.toUpperCase().replace("-", "");
+
+        if (!stock[model]) {
+          await reply(e.replyToken, [
+            { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
+          ]);
+          continue;
+        }
+
+        await reply(e.replyToken, [
+          { type: "text", text: formatStock(model, stock[model]) }
+        ]);
+        continue;
       }
-    }
 
-    await reply(e.replyToken, [
-      {
-        type: "text",
-        text: messages.join("\n")
-      }
-    ]);
-
-    continue;
-  }
-
-  // =========================
-  // 🔹 CASE 2: มีรุ่น → แสดงตัวเดียว
-  // =========================
-  const model = modelRaw.toUpperCase().replace("-", "");
-
-  if (!stock[model]) {
-    await reply(e.replyToken, [
-      { type: "text", text: "ไม่พบข้อมูลรุ่นนี้" }
-    ]);
-    continue;
-  }
-
-  let lines = [`📦 ${model} เหลือใน carton`];
-
-  for (const key of ["SP", "SEC", "LPA", "DON"]) {
-    if (stock[model][key] !== undefined) {
-      const iText = "I ".repeat(stock[model][key]).trim();
-      lines.push(`${key}: ${iText || "-"}`);
-    }
-  }
-
-  await reply(e.replyToken, [
-    { type: "text", text: lines.join("\n") }
-  ]);
-
-  continue;
-}
-
-      // 3) รวมราคา / หรือพิมพ์รายการสินค้าเลย
+      // รวมราคา / หรือพิมพ์รายการสินค้าเลย
       const result = await calculate(text);
 
       if (!result) continue;
@@ -382,7 +353,7 @@ if (text.toLowerCase().startsWith("check rate")) {
         continue;
       }
 
-      // 4) SUCCESS
+      // SUCCESS
       await reply(e.replyToken, [
         { type: "text", text: result.summary },
         { type: "text", text: result.payment },
