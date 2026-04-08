@@ -298,15 +298,16 @@ async function getSheetValues(range) {
   return res.data.values || [];
 }
 
-async function updateSheetValues(range, values) {
+async function updateSheetValuesBatch(data) {
   ensureSheetsEnabled();
 
   return withTimeout(
-    sheets.spreadsheets.values.update({
+    sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: CONFIG.SHEETS.SPREADSHEET_ID,
-      range,
-      valueInputOption: "RAW",
-      requestBody: { values }
+      requestBody: {
+        valueInputOption: "RAW",
+        data
+      }
     })
   );
 }
@@ -455,6 +456,22 @@ function getAvailableSpots(spots) {
   return spots.filter((spot) => !spot.name);
 }
 
+function buildBookedSpotsText(spots) {
+  const booked = spots.filter((spot) => spot.name);
+
+  if (booked.length === 0) {
+    return "ตอนนี้ยังไม่มีผู้จอง";
+  }
+
+  const lines = ["📌 รายชื่อผู้จองก่อนหน้า"];
+
+  for (const spot of booked) {
+    lines.push(`สปอต ${spot.spotNumber}: ${spot.name}`);
+  }
+
+  return lines.join("\n");
+}
+
 async function reserveSpots({ qty, displayName }) {
   return enqueueBooking(async () => {
     const spots = await loadSpotSheet(true);
@@ -476,10 +493,12 @@ async function reserveSpots({ qty, displayName }) {
 
     const selectedSpots = availableSpots.slice(0, qty);
 
-    for (const spot of selectedSpots) {
-      await updateSheetValues(`${CONFIG.SHEETS.SPOT.NAME}!B${spot.rowNumber}`, [[displayName]]);
-    }
+    const updates = selectedSpots.map((spot) => ({
+      range: `${CONFIG.SHEETS.SPOT.NAME}!B${spot.rowNumber}`,
+      values: [[displayName]]
+    }));
 
+    await updateSheetValuesBatch(updates);
     await loadSpotSheet(true);
 
     return {
@@ -728,10 +747,14 @@ async function handleCheckRate(replyToken, text) {
 async function handleSpotBookingStart(replyToken, userId) {
   const spots = await loadSpotSheet(true);
   const availableCount = getAvailableSpots(spots).length;
+  const bookedText = buildBookedSpotsText(spots);
 
   if (availableCount <= 0) {
     clearBookingState(userId);
-    await reply(replyToken, [{ type: "text", text: "สปอตเต็ม" }]);
+    await reply(replyToken, [
+      { type: "text", text: bookedText },
+      { type: "text", text: "สปอตเต็ม" }
+    ]);
     return;
   }
 
@@ -739,6 +762,7 @@ async function handleSpotBookingStart(replyToken, userId) {
 
   await reply(replyToken, [
     { type: "text", text: getSpotGuideText(availableCount) },
+    { type: "text", text: bookedText },
     { type: "text", text: getSpotBookingPromptText() }
   ]);
 }
