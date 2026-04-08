@@ -42,6 +42,13 @@ function displayUnit(unit) {
   return unit === "pack" ? "ซอง" : "กล่อง";
 }
 
+function getOrderGuideText() {
+  return `หากต้องการสรุปราคา พิมพ์เช่น
+OP13 2 ซอง OP15 2 ซอง
+หรือ
+OP13 1 กล่อง`;
+}
+
 // =========================
 // LOAD CSV
 // =========================
@@ -79,19 +86,11 @@ function buildPriceList(table) {
     txt += `${displayCode(code)} | ซอง ${formatBaht(item.pack)} บาท | กล่อง ${formatBaht(item.box)} บาท\n`;
   }
 
-  txt += `\nหากต้องการสรุปราคา พิมพ์เช่น\nOP13 2 ซอง OP15 2 ซอง\nหรือ\nOP13 1 กล่อง`;
-
-  return txt;
+  return txt.trim();
 }
 
 // =========================
 // PARSE
-// รองรับ:
-// OP13 2 ซอง
-// OP-13 2 ซอง
-// op13 x2 ซอง
-// prb01 1 box
-// op13 2 ซอง op15 1 box ส่งด่วน
 // =========================
 function parseItems(text) {
   const regex = /([A-Z]+-?\d+)\s*(?:x?\s*)?(\d+)\s*(ซอง|ซ็อง|pack|box|กล่อง|บ็อก)/gi;
@@ -114,8 +113,6 @@ function parseItems(text) {
 
 // =========================
 // CALCULATE
-// ไม่ต้องมีคำว่า "รวมราคา" แล้ว
-// ถ้าจับแพทเทิร์นสินค้าได้ ให้คำนวณเลย
 // =========================
 async function calculate(text) {
   const clean = text.trim();
@@ -160,7 +157,7 @@ async function calculate(text) {
   if (valid === 0) {
     return {
       status: "invalid",
-      message: "พิมพ์เช่น OP13 2 ซอง OP15 1 box"
+      message: "พิมพ์เช่น OP13 2 ซอง OP15 2 ซอง หรือ OP13 1 กล่อง"
     };
   }
 
@@ -204,19 +201,28 @@ app.post("/webhook", async (req, res) => {
 
       const text = e.message.text.trim();
 
-      // 📋 ราคาสินค้า
+      // 1) พิมพ์ "ราคาสินค้า"
       if (text === "ราคาสินค้า") {
         const table = await loadPrices();
+
         await reply(e.replyToken, [
-          { type: "text", text: buildPriceList(table) }
+          { type: "text", text: buildPriceList(table) },
+          { type: "text", text: getOrderGuideText() }
         ]);
         continue;
       }
 
-      // 🧾 คำนวณอัตโนมัติ ถ้าจับแพทเทิร์นสินค้าได้
+      // 2) พิมพ์ "รวมราคา" อย่างเดียว
+      if (text === "รวมราคา") {
+        await reply(e.replyToken, [
+          { type: "text", text: getOrderGuideText() }
+        ]);
+        continue;
+      }
+
+      // 3) คำนวณอัตโนมัติ ถ้าจับแพทเทิร์นสินค้าได้
       const result = await calculate(text);
 
-      // ถ้าไม่ใช่ข้อความรูปแบบสินค้า ก็ไม่ตอบ
       if (!result) continue;
 
       if (result.status === "invalid") {
@@ -226,7 +232,7 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // ✅ SUCCESS
+      // 4) SUCCESS
       await reply(e.replyToken, [
         { type: "text", text: result.summary },
         { type: "text", text: result.payment },
