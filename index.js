@@ -1,6 +1,7 @@
 import express from "express";
 import fetch from "node-fetch";
 import { google } from "googleapis";
+import { Readable } from "stream";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -44,12 +45,23 @@ const CONFIG = {
     CAMPAIGN: {
       NAME: process.env.CAMPAIGN_SHEET_NAME || "ชีต4",
       GID: process.env.CAMPAIGN_SHEET_GID || "1706280606"
+    },
+
+    LOG: {
+      NAME: process.env.LOG_SHEET_NAME || "ชีต5",
+      GID: process.env.LOG_SHEET_GID || "2113781022"
+    },
+
+    CUSTOMER: {
+      NAME: process.env.CUSTOMER_SHEET_NAME || "ชีต6",
+      GID: process.env.CUSTOMER_SHEET_GID || "1948361968"
     }
   },
 
   GOOGLE: {
     SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "",
-    PRIVATE_KEY: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n")
+    PRIVATE_KEY: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+    DRIVE_FOLDER_ID: process.env.GOOGLE_DRIVE_FOLDER_ID || ""
   },
 
   PAYMENT: {
@@ -70,22 +82,26 @@ if (!CONFIG.LINE.TOKEN) {
   console.error("❌ Missing LINE_CHANNEL_ACCESS_TOKEN");
 }
 
-const hasGoogleSheetsWriteConfig =
+const hasGoogleConfig =
   !!CONFIG.GOOGLE.SERVICE_ACCOUNT_EMAIL && !!CONFIG.GOOGLE.PRIVATE_KEY;
 
-// =========================
-// GOOGLE SHEETS AUTH
-// =========================
-const auth = hasGoogleSheetsWriteConfig
+const auth = hasGoogleConfig
   ? new google.auth.JWT({
       email: CONFIG.GOOGLE.SERVICE_ACCOUNT_EMAIL,
       key: CONFIG.GOOGLE.PRIVATE_KEY,
-      scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+      scopes: [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
     })
   : null;
 
-const sheets = hasGoogleSheetsWriteConfig
+const sheets = hasGoogleConfig
   ? google.sheets({ version: "v4", auth })
+  : null;
+
+const drive = hasGoogleConfig
+  ? google.drive({ version: "v3", auth })
   : null;
 
 // =========================
@@ -95,7 +111,8 @@ const cache = {
   prices: { data: null, fetchedAt: 0 },
   stock: { data: null, fetchedAt: 0 },
   spots: { data: null, fetchedAt: 0 },
-  campaign: { data: null, fetchedAt: 0 }
+  campaign: { data: null, fetchedAt: 0 },
+  customers: { data: null, fetchedAt: 0 }
 };
 
 const bookingStates = new Map();
@@ -107,6 +124,10 @@ let bookingQueue = Promise.resolve();
 // =========================
 function nowISO() {
   return new Date().toISOString();
+}
+
+function nowLocalText() {
+  return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Bangkok" }).replace(" ", " ");
 }
 
 function logInfo(...args) {
@@ -231,7 +252,6 @@ function setBookingState(userId, mode) {
 
 function getBookingState(userId) {
   if (!userId) return null;
-
   const state = bookingStates.get(userId);
   if (!state) return null;
 
@@ -274,6 +294,10 @@ function clearPaymentTracking(userId) {
   paymentTracking.delete(userId);
 }
 
+function padCustomerNo(num) {
+  return String(num).padStart(4, "0");
+}
+
 async function enqueueBooking(task) {
   const run = bookingQueue.then(task, task);
   bookingQueue = run.catch(() => {});
@@ -300,18 +324,18 @@ async function fetchText(url) {
 }
 
 // =========================
-// GOOGLE SHEETS HELPERS
+// GOOGLE HELPERS
 // =========================
-function ensureSheetsEnabled() {
-  if (!sheets) {
+function ensureGoogleEnabled() {
+  if (!sheets || !drive) {
     throw new Error(
-      "Google Sheets write system is not configured. Please set GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY."
+      "Google system is not configured. Please set GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY."
     );
   }
 }
 
 async function getSheetValues(range) {
-  ensureSheetsEnabled();
+  ensureGoogleEnabled();
 
   const res = await withTimeout(
     sheets.spreadsheets.values.get({
@@ -324,7 +348,7 @@ async function getSheetValues(range) {
 }
 
 async function updateSheetValuesBatch(data) {
-  ensureSheetsEnabled();
+  ensureGoogleEnabled();
 
   return withTimeout(
     sheets.spreadsheets.values.batchUpdate({
@@ -337,8 +361,153 @@ async function updateSheetValuesBatch(data) {
   );
 }
 
+async function appendSheetRow(range, values) {
+  ensureGoogleEnabled();
+
+  return withTimeout(
+    sheets.spreadsheets.values.append({
+      spreadsheetId: CONFIG.SHEETS.SPREADSHEET_ID,
+      range,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [values]
+      }
+    })
+  );
+}
+
 // =========================
-// LOAD PRICE CSV
+// LINE HELPERS
+// =========================
+async function getLineProfile(userId) {
+  if (!userId) throw new Error("Missing userId");
+
+  const res = await withTimeout(
+    fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
+      }
+    })
+  );
+
+  const body = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`Get profile failed ${res.status}: ${body}`);
+  }
+
+  return JSON.parse(body);
+}
+
+async function downloadLineImageBuffer(messageId) {
+  const res = await withTimeout(
+    fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
+      }
+    })
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Download LINE image failed ${res.status}: ${body}`);
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
+async function uploadSlipToDrive(buffer, fileName) {
+  ensureGoogleEnabled();
+
+  if (!CONFIG.GOOGLE.DRIVE_FOLDER_ID) {
+    throw new Error("Missing GOOGLE_DRIVE_FOLDER_ID");
+  }
+
+  const stream = Readable.from(buffer);
+
+  const createRes = await withTimeout(
+    drive.files.create({
+      requestBody: {
+        name: fileName,
+        parents: [CONFIG.GOOGLE.DRIVE_FOLDER_ID]
+      },
+      media: {
+        mimeType: "image/jpeg",
+        body: stream
+      },
+      fields: "id, webViewLink, webContentLink",
+      supportsAllDrives: true
+    })
+  );
+
+  const fileId = createRes.data.id;
+
+  await withTimeout(
+    drive.permissions.create({
+      fileId,
+      requestBody: {
+        role: "reader",
+        type: "anyone"
+      },
+      supportsAllDrives: true
+    })
+  );
+
+  const file = await withTimeout(
+    drive.files.get({
+      fileId,
+      fields: "id, webViewLink, webContentLink",
+      supportsAllDrives: true
+    })
+  );
+
+  return {
+    fileId: file.data.id,
+    url: file.data.webViewLink || file.data.webContentLink || ""
+  };
+}
+
+async function reply(replyToken, messages) {
+  const safeMessages = messages
+    .filter(Boolean)
+    .flatMap((msg) => {
+      if (msg.type === "text") {
+        return chunkText(msg.text).map((chunk) => ({
+          type: "text",
+          text: chunk
+        }));
+      }
+      return [msg];
+    })
+    .slice(0, 5);
+
+  const res = await withTimeout(
+    fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
+      },
+      body: JSON.stringify({
+        replyToken,
+        messages: safeMessages
+      })
+    })
+  );
+
+  const body = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`LINE reply failed ${res.status}: ${body}`);
+  }
+}
+
+// =========================
+// LOADERS
 // =========================
 async function loadPrices(forceRefresh = false) {
   const age = Date.now() - cache.prices.fetchedAt;
@@ -348,10 +517,7 @@ async function loadPrices(forceRefresh = false) {
 
   const csv = await fetchText(CONFIG.SHEETS.PRICE.CSV_URL);
   const rows = parseCSV(csv);
-
-  if (rows.length < 2) {
-    throw new Error("Price sheet has no data rows");
-  }
+  if (rows.length < 2) throw new Error("Price sheet has no data rows");
 
   const table = {};
 
@@ -373,9 +539,6 @@ async function loadPrices(forceRefresh = false) {
   return table;
 }
 
-// =========================
-// LOAD STOCK CSV
-// =========================
 async function loadStock(forceRefresh = false) {
   const age = Date.now() - cache.stock.fetchedAt;
   if (!forceRefresh && cache.stock.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
@@ -384,10 +547,7 @@ async function loadStock(forceRefresh = false) {
 
   const csv = await fetchText(CONFIG.SHEETS.STOCK.CSV_URL);
   const rows = parseCSV(csv);
-
-  if (rows.length < 2) {
-    throw new Error("Stock sheet has no data rows");
-  }
+  if (rows.length < 2) throw new Error("Stock sheet has no data rows");
 
   const stock = {};
 
@@ -407,9 +567,6 @@ async function loadStock(forceRefresh = false) {
   return stock;
 }
 
-// =========================
-// LOAD SPOT SHEET
-// =========================
 async function loadSpotSheet(forceRefresh = false) {
   const age = Date.now() - cache.spots.fetchedAt;
   if (!forceRefresh && cache.spots.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
@@ -417,10 +574,7 @@ async function loadSpotSheet(forceRefresh = false) {
   }
 
   const rows = await getSheetValues(`${CONFIG.SHEETS.SPOT.NAME}!A:C`);
-
-  if (rows.length < 2) {
-    throw new Error("Spot sheet has no data rows");
-  }
+  if (rows.length < 2) throw new Error("Spot sheet has no data rows");
 
   const spots = [];
 
@@ -451,9 +605,6 @@ async function loadSpotSheet(forceRefresh = false) {
   return spots;
 }
 
-// =========================
-// LOAD CAMPAIGN SHEET
-// =========================
 async function loadCampaign(forceRefresh = false) {
   const age = Date.now() - cache.campaign.fetchedAt;
   if (!forceRefresh && cache.campaign.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
@@ -471,6 +622,88 @@ async function loadCampaign(forceRefresh = false) {
 
   cache.campaign = { data: campaign, fetchedAt: Date.now() };
   return campaign;
+}
+
+async function loadCustomers(forceRefresh = false) {
+  const age = Date.now() - cache.customers.fetchedAt;
+  if (!forceRefresh && cache.customers.data && age < CONFIG.SYSTEM.CACHE_TTL_MS) {
+    return cache.customers.data;
+  }
+
+  const rows = await getSheetValues(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:D`);
+  const customers = [];
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const customerNo = String(row[0] || "").trim();
+    const userId = String(row[1] || "").trim();
+    const latestName = String(row[2] || "").trim();
+    const createdAt = String(row[3] || "").trim();
+
+    if (!customerNo && !userId) continue;
+
+    customers.push({
+      rowNumber: i + 1,
+      customerNo,
+      userId,
+      latestName,
+      createdAt
+    });
+  }
+
+  cache.customers = { data: customers, fetchedAt: Date.now() };
+  return customers;
+}
+
+// =========================
+// CUSTOMER MASTER
+// =========================
+async function getOrCreateCustomer(userId, displayName) {
+  const customers = await loadCustomers(true);
+
+  if (userId) {
+    const found = customers.find((c) => c.userId === userId);
+    if (found) {
+      if (displayName && found.latestName !== displayName) {
+        await updateSheetValuesBatch([
+          {
+            range: `${CONFIG.SHEETS.CUSTOMER.NAME}!C${found.rowNumber}`,
+            values: [[displayName]]
+          }
+        ]);
+        await loadCustomers(true);
+      }
+
+      return {
+        customerNo: found.customerNo,
+        userId: found.userId,
+        displayName: displayName || found.latestName || "ลูกค้า"
+      };
+    }
+  }
+
+  const maxNo = customers.reduce((max, c) => {
+    const num = Number(c.customerNo);
+    return Number.isNaN(num) ? max : Math.max(max, num);
+  }, 0);
+
+  const nextNo = padCustomerNo(maxNo + 1);
+  const nowText = nowLocalText();
+
+  await appendSheetRow(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:D`, [
+    nextNo,
+    userId || "",
+    displayName || "ลูกค้า",
+    nowText
+  ]);
+
+  await loadCustomers(true);
+
+  return {
+    customerNo: nextNo,
+    userId: userId || "",
+    displayName: displayName || "ลูกค้า"
+  };
 }
 
 // =========================
@@ -576,6 +809,42 @@ async function markLatestBookingAsSlipSent(displayName) {
 
   await updateSheetValuesBatch(updates);
   return { ok: true, count: rowsToUpdate.length };
+}
+
+// =========================
+// LOG HELPERS
+// =========================
+async function appendOrderLog({
+  type,
+  customerNo,
+  userId,
+  displayName,
+  itemName,
+  detail,
+  qty,
+  unitPrice,
+  total,
+  spotNumbers,
+  slipStatus,
+  slipUrl,
+  note
+}) {
+  await appendSheetRow(`${CONFIG.SHEETS.LOG.NAME}!A:N`, [
+    nowLocalText(),
+    type || "",
+    customerNo || "",
+    userId || "",
+    displayName || "",
+    itemName || "",
+    detail || "",
+    qty != null ? String(qty) : "",
+    unitPrice != null ? String(unitPrice) : "",
+    total != null ? String(total) : "",
+    spotNumbers || "",
+    slipStatus || "",
+    slipUrl || "",
+    note || ""
+  ]);
 }
 
 // =========================
@@ -694,6 +963,7 @@ async function calculate(text) {
   let total = 0;
   let valid = 0;
   const lines = ["🧾 สรุปรายการ"];
+  const detailLines = [];
 
   for (const item of items) {
     const priceData = table[item.code];
@@ -714,9 +984,18 @@ async function calculate(text) {
     total += sum;
     valid += 1;
 
-    lines.push(
-      `${displayCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(unitPrice)} x${item.qty} = ${formatBaht(sum)} บาท`
-    );
+    const detailText =
+      `${displayCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(unitPrice)} x${item.qty} = ${formatBaht(sum)} บาท`;
+
+    lines.push(detailText);
+    detailLines.push({
+      code: displayCode(item.code),
+      qty: item.qty,
+      unit: displayUnit(item.unit),
+      unitPrice,
+      sum,
+      text: detailText
+    });
   }
 
   if (valid === 0) {
@@ -732,69 +1011,10 @@ async function calculate(text) {
   return {
     status: "success",
     summary: lines.join("\n"),
-    payment: `📌 กรุณาโอน ${formatBaht(total)} บาท`
+    payment: `📌 กรุณาโอน ${formatBaht(total)} บาท`,
+    total,
+    detailLines
   };
-}
-
-// =========================
-// LINE HELPERS
-// =========================
-async function getLineProfile(userId) {
-  if (!userId) {
-    throw new Error("Missing userId");
-  }
-
-  const res = await withTimeout(
-    fetch(`https://api.line.me/v2/bot/profile/${userId}`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
-      }
-    })
-  );
-
-  const body = await res.text();
-
-  if (!res.ok) {
-    throw new Error(`Get profile failed ${res.status}: ${body}`);
-  }
-
-  return JSON.parse(body);
-}
-
-async function reply(replyToken, messages) {
-  const safeMessages = messages
-    .filter(Boolean)
-    .flatMap((msg) => {
-      if (msg.type === "text") {
-        return chunkText(msg.text).map((chunk) => ({
-          type: "text",
-          text: chunk
-        }));
-      }
-      return [msg];
-    })
-    .slice(0, 5);
-
-  const res = await withTimeout(
-    fetch("https://api.line.me/v2/bot/message/reply", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
-      },
-      body: JSON.stringify({
-        replyToken,
-        messages: safeMessages
-      })
-    })
-  );
-
-  const body = await res.text();
-
-  if (!res.ok) {
-    throw new Error(`LINE reply failed ${res.status}: ${body}`);
-  }
 }
 
 // =========================
@@ -861,10 +1081,7 @@ async function handleSpotBookingStart(replyToken, userId) {
 
   if (availableCount <= 0) {
     clearBookingState(userId);
-    messages.push({
-      type: "text",
-      text: "สปอตเต็ม"
-    });
+    messages.push({ type: "text", text: "สปอตเต็ม" });
     await reply(replyToken, messages);
     return;
   }
@@ -900,6 +1117,9 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
     logError("Get profile error:", err.message);
   }
 
+  const customer = await getOrCreateCustomer(userId, displayName);
+  displayName = customer.displayName;
+
   const campaign = await loadCampaign(true);
   const result = await reserveSpots({ qty, displayName });
   clearBookingState(userId);
@@ -913,19 +1133,25 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
 
   if (userId) {
     setPaymentTracking(userId, {
+      type: "spot_booking",
+      customerNo: customer.customerNo,
+      userId,
       displayName,
+      itemName: campaign.title || "รายการจองสปอต",
+      detail: "จองสปอต",
       qty,
+      unitPrice: campaign.price || 0,
       total,
-      spotNumbers: result.spots
+      spotNumbers: result.spots.join(", ")
     });
   }
 
-  // ย้ายสรุปยอดไปล่างสุด
   await reply(replyToken, [
     {
       type: "text",
       text: `✅ จองสำเร็จ ${qty} สปอต
 ชื่อ: ${displayName}
+รหัสลูกค้า: ${customer.customerNo}
 หมายเลขสปอต: ${result.spots.join(", ")}`
     },
     {
@@ -962,11 +1188,52 @@ ${campaign.title || "รายการจองสปอต"}
   ]);
 }
 
-async function handleSlipImage(replyToken, userId) {
+async function handleSlipImage(replyToken, userId, messageId) {
+  let displayName = "ลูกค้า";
+
+  try {
+    if (userId) {
+      const profile = await getLineProfile(userId);
+      displayName = profile.displayName || "ลูกค้า";
+    }
+  } catch (err) {
+    logError("Get profile error:", err.message);
+  }
+
+  const customer = await getOrCreateCustomer(userId, displayName);
   const payment = getPaymentTracking(userId);
 
-  // ถ้าไม่มี booking tracking ให้ตอบกลาง ๆ สำหรับการซื้อปกติ
+  let slipUrl = "";
+  try {
+    if (messageId && CONFIG.GOOGLE.DRIVE_FOLDER_ID) {
+      const buffer = await downloadLineImageBuffer(messageId);
+      const uploaded = await uploadSlipToDrive(
+        buffer,
+        `slip_${customer.customerNo}_${Date.now()}.jpg`
+      );
+      slipUrl = uploaded.url || "";
+    }
+  } catch (err) {
+    logError("Upload slip error:", err.message);
+  }
+
   if (!payment) {
+    await appendOrderLog({
+      type: "normal_order",
+      customerNo: customer.customerNo,
+      userId: customer.userId,
+      displayName: customer.displayName,
+      itemName: "",
+      detail: "ลูกค้าส่งสลิป แต่ไม่พบรายการ tracking ล่าสุด",
+      qty: "",
+      unitPrice: "",
+      total: "",
+      spotNumbers: "",
+      slipStatus: "ส่งสลิปแล้ว",
+      slipUrl,
+      note: "รอแอดมินตรวจสอบ"
+    });
+
     await reply(replyToken, [
       {
         type: "text",
@@ -976,33 +1243,44 @@ async function handleSlipImage(replyToken, userId) {
     return;
   }
 
-  const result = await markLatestBookingAsSlipSent(payment.displayName);
+  if (payment.type === "spot_booking") {
+    const markResult = await markLatestBookingAsSlipSent(payment.displayName);
+    if (!markResult.ok) {
+      logError("Mark booking slip status failed:", markResult.message);
+    }
+  }
+
+  await appendOrderLog({
+    type: payment.type,
+    customerNo: payment.customerNo || customer.customerNo,
+    userId: payment.userId || customer.userId,
+    displayName: payment.displayName || customer.displayName,
+    itemName: payment.itemName || "",
+    detail: payment.detail || "",
+    qty: payment.qty != null ? payment.qty : "",
+    unitPrice: payment.unitPrice != null ? payment.unitPrice : "",
+    total: payment.total != null ? payment.total : "",
+    spotNumbers: payment.spotNumbers || "",
+    slipStatus: "ส่งสลิปแล้ว",
+    slipUrl,
+    note: "รอแอดมินตรวจสอบ"
+  });
+
   clearPaymentTracking(userId);
-
-  if (!result.ok) {
-    await reply(replyToken, [
-      {
-        type: "text",
-        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
-      }
-    ]);
-    return;
-  }
 
   await reply(replyToken, [
     {
       type: "text",
       text: `📩 ได้รับรูปสลิปแล้ว
-ชื่อ: ${payment.displayName}
-จำนวนสปอต: ${payment.qty}
-หมายเลขสปอต: ${payment.spotNumbers.join(", ")}
+ชื่อ: ${payment.displayName || customer.displayName}
+รหัสลูกค้า: ${payment.customerNo || customer.customerNo}
 
-ระบบได้อัปเดตสถานะเป็น "ส่งสลิปแล้ว" เรียบร้อย กรุณารอแอดมินตรวจสอบ`
+ระบบได้บันทึกข้อมูลเรียบร้อย กรุณารอแอดมินตรวจสอบ`
     }
   ]);
 }
 
-async function handleOrder(replyToken, text) {
+async function handleOrder(replyToken, userId, text) {
   const result = await calculate(text);
 
   if (!result) return false;
@@ -1018,7 +1296,34 @@ async function handleOrder(replyToken, text) {
   }
 
   if (result.status === "success") {
-    // ย้ายสรุปราคาไปล่างสุด
+    let displayName = "ลูกค้า";
+
+    try {
+      if (userId) {
+        const profile = await getLineProfile(userId);
+        displayName = profile.displayName || "ลูกค้า";
+      }
+    } catch (err) {
+      logError("Get profile error:", err.message);
+    }
+
+    const customer = await getOrCreateCustomer(userId, displayName);
+
+    if (userId) {
+      setPaymentTracking(userId, {
+        type: "normal_order",
+        customerNo: customer.customerNo,
+        userId,
+        displayName: customer.displayName,
+        itemName: "คำสั่งซื้อสินค้า",
+        detail: result.detailLines.map((x) => x.text).join(" | "),
+        qty: result.detailLines.reduce((sum, x) => sum + Number(x.qty || 0), 0),
+        unitPrice: "",
+        total: result.total,
+        spotNumbers: ""
+      });
+    }
+
     await reply(replyToken, [
       { type: "text", text: result.payment },
       {
@@ -1038,7 +1343,7 @@ True Wallet 0982652650
 
 ✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨
 
-ขอบคุณนะครับ`
+รหัสลูกค้า: ${customer.customerNo}`
       },
       { type: "text", text: result.summary }
     ]);
@@ -1062,11 +1367,12 @@ app.get("/", (req, res) => {
 
 app.get("/health", async (req, res) => {
   try {
-    const [prices, stock, spots, campaign] = await Promise.all([
+    const [prices, stock, spots, campaign, customers] = await Promise.all([
       loadPrices(),
       loadStock(),
       loadSpotSheet(true),
-      loadCampaign(true)
+      loadCampaign(true),
+      loadCustomers(true)
     ]);
 
     res.status(200).json({
@@ -1075,7 +1381,9 @@ app.get("/health", async (req, res) => {
       stockModels: Object.keys(stock).length,
       totalSpots: spots.length,
       availableSpots: getAvailableSpots(spots).length,
-      bookingEnabled: hasGoogleSheetsWriteConfig,
+      totalCustomers: customers.length,
+      bookingEnabled: hasGoogleConfig,
+      driveEnabled: !!CONFIG.GOOGLE.DRIVE_FOLDER_ID,
       campaign
     });
   } catch (err) {
@@ -1101,7 +1409,7 @@ app.post("/webhook", async (req, res) => {
         const userId = event.source?.userId || "";
 
         if (event.message.type === "image") {
-          await handleSlipImage(replyToken, userId);
+          await handleSlipImage(replyToken, userId, event.message.id);
           continue;
         }
 
@@ -1131,7 +1439,7 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-        const handled = await handleOrder(replyToken, text);
+        const handled = await handleOrder(replyToken, userId, text);
         if (handled) continue;
       } catch (eventErr) {
         logError("Event handling error:", eventErr);
@@ -1161,4 +1469,7 @@ app.post("/webhook", async (req, res) => {
 // =========================
 app.listen(CONFIG.PORT, () => {
   logInfo(`✅ Server running on port ${CONFIG.PORT}`);
+  logInfo("LOG_SHEET_NAME =", CONFIG.SHEETS.LOG.NAME);
+  logInfo("CUSTOMER_SHEET_NAME =", CONFIG.SHEETS.CUSTOMER.NAME);
+  logInfo("DRIVE_ENABLED =", !!CONFIG.GOOGLE.DRIVE_FOLDER_ID);
 });
