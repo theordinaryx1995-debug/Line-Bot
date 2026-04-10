@@ -1540,73 +1540,6 @@ function markRecentSlipMessageId(messageId) {
 // =========================================================
 // ADMIN DASHBOARD
 // =========================================================
-async function getAdminSummary() {
-  const [spots, campaign] = await Promise.all([
-    loadSpotSheet(true),
-    loadCampaign(true)
-  ]);
-
-  const sortedSpots = [...spots].sort(
-    (a, b) => Number(a.spotNumber) - Number(b.spotNumber)
-  );
-
-  return {
-    serviceTime: nowISO(),
-    campaign,
-    totalSpots: sortedSpots.length,
-    availableSpots: sortedSpots.filter((x) => !x.name).length,
-    bookedSpots: sortedSpots.filter((x) => x.name).length,
-    spots: sortedSpots.map((spot) => ({
-      number: spot.spotNumber,
-      name: spot.name || "",
-      paymentStatus: spot.paymentStatus || ""
-    }))
-  };
-}
-
-function renderSpotsGrid(summary) {
-  const spots = Array.isArray(summary?.spots) ? summary.spots : [];
-
-  if (spots.length === 0) {
-    return `
-      <section class="spot-board">
-        <div class="section-head">
-          <h2>SPOT Status</h2>
-          <p>ยังไม่พบข้อมูลสปอต</p>
-        </div>
-      </section>
-    `;
-  }
-
-  return `
-    <section class="spot-board">
-      <div class="section-head">
-        <h2>SPOT Status</h2>
-        <p>ตรวจสอบรายชื่อผู้จองแต่ละช่องได้แบบเรียลไทม์</p>
-      </div>
-
-      <div class="spot-grid">
-        ${spots
-          .map((spot) => {
-            const isFilled = !!spot.name;
-            return `
-              <div class="spot-card ${isFilled ? "filled" : "empty"}">
-                <div class="spot-no">SPOT ${spot.number}</div>
-                <div class="spot-name">${spot.name || "ว่าง"}</div>
-                ${
-                  isFilled && spot.paymentStatus
-                    ? `<div class="spot-status">${spot.paymentStatus}</div>`
-                    : `<div class="spot-status empty-status">พร้อมจอง</div>`
-                }
-              </div>
-            `;
-          })
-          .join("")}
-      </div>
-    </section>
-  `;
-}
-
 function renderAdminHtml(summary) {
   const campaignTitle = summary?.campaign?.title || "-";
   const campaignPrice = formatBaht(summary?.campaign?.price || 0);
@@ -1689,6 +1622,20 @@ function renderAdminHtml(summary) {
     margin-top: 18px;
     font-size: 13px;
     color: #64748b;
+  }
+
+  .refresh-box {
+    margin-top: 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
   }
 
   .hero-right {
@@ -1925,6 +1872,9 @@ function renderAdminHtml(summary) {
           หน้าสรุปภาพรวมแคมเปญสำหรับติดตามจำนวนสปอต ราคา และสถานะการจองแบบเรียลไทม์
         </p>
         <div class="updated">Updated: ${summary.serviceTime}</div>
+        <div class="refresh-box">
+          รีเฟรชอัตโนมัติใน <span id="countdown">10</span> วินาที
+        </div>
       </div>
 
       <div class="hero-right">
@@ -1969,39 +1919,27 @@ function renderAdminHtml(summary) {
       Ordinary Campaign Dashboard • Focus view for SPOT booking only
     </div>
   </div>
+
+  <script>
+    let seconds = 10;
+    const countdownEl = document.getElementById("countdown");
+
+    setInterval(() => {
+      seconds -= 1;
+
+      if (countdownEl) {
+        countdownEl.textContent = seconds;
+      }
+
+      if (seconds <= 0) {
+        window.location.reload();
+      }
+    }, 1000);
+  </script>
 </body>
 </html>
   `;
 }
-
-app.get("/admin", async (req, res) => {
-  if (!verifyAdmin(req)) {
-    return res.status(401).send("Unauthorized");
-  }
-
-  try {
-    const summary = await getAdminSummary();
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.status(200).send(renderAdminHtml(summary));
-  } catch (err) {
-    logError("Admin page error:", err.message);
-    res.status(500).send("Admin dashboard error");
-  }
-});
-
-app.get("/admin/api/summary", async (req, res) => {
-  if (!verifyAdmin(req)) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
-  }
-
-  try {
-    const summary = await getAdminSummary();
-    res.status(200).json({ ok: true, summary });
-  } catch (err) {
-    logError("Admin api error:", err.message);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
 // =========================================================
 // MESSAGE HANDLERS
 // =========================================================
