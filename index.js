@@ -1540,6 +1540,73 @@ function markRecentSlipMessageId(messageId) {
 // =========================================================
 // ADMIN DASHBOARD
 // =========================================================
+async function getAdminSummary() {
+  const [spots, campaign] = await Promise.all([
+    loadSpotSheet(true),
+    loadCampaign(true)
+  ]);
+
+  const sortedSpots = [...spots].sort(
+    (a, b) => Number(a.spotNumber) - Number(b.spotNumber)
+  );
+
+  return {
+    serviceTime: nowISO(),
+    campaign,
+    totalSpots: sortedSpots.length,
+    availableSpots: sortedSpots.filter((x) => !x.name).length,
+    bookedSpots: sortedSpots.filter((x) => x.name).length,
+    spots: sortedSpots.map((spot) => ({
+      number: spot.spotNumber,
+      name: spot.name || "",
+      paymentStatus: spot.paymentStatus || ""
+    }))
+  };
+}
+
+function renderSpotsGrid(summary) {
+  const spots = Array.isArray(summary?.spots) ? summary.spots : [];
+
+  if (spots.length === 0) {
+    return `
+      <section class="spot-board">
+        <div class="section-head">
+          <h2>SPOT Status</h2>
+          <p>ยังไม่พบข้อมูลสปอต</p>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="spot-board">
+      <div class="section-head">
+        <h2>SPOT Status</h2>
+        <p>ตรวจสอบรายชื่อผู้จองแต่ละช่องได้แบบเรียลไทม์</p>
+      </div>
+
+      <div class="spot-grid">
+        ${spots
+          .map((spot) => {
+            const isFilled = !!spot.name;
+            return `
+              <div class="spot-card ${isFilled ? "filled" : "empty"}">
+                <div class="spot-no">SPOT ${spot.number}</div>
+                <div class="spot-name">${spot.name || "ว่าง"}</div>
+                ${
+                  isFilled && spot.paymentStatus
+                    ? `<div class="spot-status">${spot.paymentStatus}</div>`
+                    : `<div class="spot-status empty-status">พร้อมจอง</div>`
+                }
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderAdminHtml(summary) {
   const campaignTitle = summary?.campaign?.title || "-";
   const campaignPrice = formatBaht(summary?.campaign?.price || 0);
@@ -1553,7 +1620,9 @@ function renderAdminHtml(summary) {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ระบบการจอง SPOT TCG Ordinary</title>
 <style>
-  * { box-sizing: border-box; }
+  * {
+    box-sizing: border-box;
+  }
 
   body {
     margin: 0;
@@ -1567,14 +1636,14 @@ function renderAdminHtml(summary) {
   }
 
   .container {
-    max-width: 1400px;
+    max-width: 1440px;
     margin: 0 auto;
     padding: 28px;
   }
 
   .hero {
     display: grid;
-    grid-template-columns: 1.3fr 0.9fr;
+    grid-template-columns: 1.2fr 0.9fr;
     gap: 24px;
     align-items: stretch;
     margin-bottom: 24px;
@@ -1734,7 +1803,7 @@ function renderAdminHtml(summary) {
 
   .spot-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 14px;
   }
 
@@ -1765,11 +1834,31 @@ function renderAdminHtml(summary) {
   }
 
   .spot-name {
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 800;
     color: #0f172a;
     line-height: 1.25;
     word-break: break-word;
+    min-height: 54px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .spot-status {
+    margin-top: 10px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+    background: rgba(255,255,255,0.7);
+    border-radius: 999px;
+    padding: 6px 10px;
+    display: inline-block;
+  }
+
+  .empty-status {
+    color: #047857;
+    background: rgba(255,255,255,0.72);
   }
 
   .footer-note {
@@ -1817,6 +1906,11 @@ function renderAdminHtml(summary) {
 
     .spot-grid {
       grid-template-columns: repeat(2, minmax(120px, 1fr));
+    }
+
+    .spot-name {
+      font-size: 18px;
+      min-height: 48px;
     }
   }
 </style>
@@ -1879,6 +1973,35 @@ function renderAdminHtml(summary) {
 </html>
   `;
 }
+
+app.get("/admin", async (req, res) => {
+  if (!verifyAdmin(req)) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  try {
+    const summary = await getAdminSummary();
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(200).send(renderAdminHtml(summary));
+  } catch (err) {
+    logError("Admin page error:", err.message);
+    res.status(500).send("Admin dashboard error");
+  }
+});
+
+app.get("/admin/api/summary", async (req, res) => {
+  if (!verifyAdmin(req)) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  try {
+    const summary = await getAdminSummary();
+    res.status(200).json({ ok: true, summary });
+  } catch (err) {
+    logError("Admin api error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 // =========================================================
 // MESSAGE HANDLERS
 // =========================================================
