@@ -1,7 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
 import { google } from "googleapis";
-import { Readable } from "stream";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -47,11 +46,6 @@ const CONFIG = {
       GID: process.env.CAMPAIGN_SHEET_GID || "1706280606"
     },
 
-    LOG: {
-      NAME: process.env.LOG_SHEET_NAME || "ชีต5",
-      GID: process.env.LOG_SHEET_GID || "2113781022"
-    },
-
     CUSTOMER: {
       NAME: process.env.CUSTOMER_SHEET_NAME || "ชีต6",
       GID: process.env.CUSTOMER_SHEET_GID || "1948361968"
@@ -60,8 +54,7 @@ const CONFIG = {
 
   GOOGLE: {
     SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "",
-    PRIVATE_KEY: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
-    DRIVE_FOLDER_ID: process.env.GOOGLE_DRIVE_FOLDER_ID || ""
+    PRIVATE_KEY: (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n")
   },
 
   PAYMENT: {
@@ -74,7 +67,7 @@ const CONFIG = {
     FETCH_TIMEOUT_MS: Number(process.env.FETCH_TIMEOUT_MS || 12000),
     CACHE_TTL_MS: Number(process.env.CACHE_TTL_MS || 60 * 1000),
     LINE_TEXT_LIMIT: Number(process.env.LINE_TEXT_LIMIT || 5000),
-    BOOKING_STATE_TTL_MS: Number(process.env.BOOKING_STATE_TTL_MS || 10 * 60 * 1000)
+    STATE_TTL_MS: Number(process.env.STATE_TTL_MS || 10 * 60 * 1000)
   }
 };
 
@@ -85,23 +78,19 @@ if (!CONFIG.LINE.TOKEN) {
 const hasGoogleConfig =
   !!CONFIG.GOOGLE.SERVICE_ACCOUNT_EMAIL && !!CONFIG.GOOGLE.PRIVATE_KEY;
 
+// =========================
+// GOOGLE SHEETS AUTH
+// =========================
 const auth = hasGoogleConfig
   ? new google.auth.JWT({
       email: CONFIG.GOOGLE.SERVICE_ACCOUNT_EMAIL,
       key: CONFIG.GOOGLE.PRIVATE_KEY,
-      scopes: [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-      ]
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"]
     })
   : null;
 
 const sheets = hasGoogleConfig
   ? google.sheets({ version: "v4", auth })
-  : null;
-
-const drive = hasGoogleConfig
-  ? google.drive({ version: "v3", auth })
   : null;
 
 // =========================
@@ -115,8 +104,12 @@ const cache = {
   customers: { data: null, fetchedAt: 0 }
 };
 
-const bookingStates = new Map();
+// userId => { mode, expiresAt }
+const sessionStates = new Map();
+
+// userId => payment context
 const paymentTracking = new Map();
+
 let bookingQueue = Promise.resolve();
 
 // =========================
@@ -127,7 +120,7 @@ function nowISO() {
 }
 
 function nowLocalText() {
-  return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Bangkok" }).replace(" ", " ");
+  return new Date().toLocaleString("sv-SE", { timeZone: "Asia/Bangkok" });
 }
 
 function logInfo(...args) {
@@ -174,6 +167,12 @@ function getOrderGuideText() {
 OP13 2 ซอง OP15 2 ซอง
 หรือ
 OP13 1 กล่อง`;
+}
+
+function getAddressTemplateText() {
+  return `ชื่อผู้รับ:
+เบอร์โทร:
+ที่อยู่:`;
 }
 
 function chunkText(text, limit = CONFIG.SYSTEM.LINE_TEXT_LIMIT) {
@@ -242,37 +241,66 @@ function isPositiveIntegerText(text) {
   return /^[1-9]\d*$/.test(String(text || "").trim());
 }
 
-function setBookingState(userId, mode) {
+function parseSpotNumbers(text) {
+  const clean = String(text || "").trim();
+  if (!clean) return null;
+
+  const parts = clean
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) return null;
+
+  const numbers = [];
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) {
+      return null;
+    }
+
+    const num = Number(part);
+    if (!Number.isInteger(num) || num <= 0) {
+      return null;
+    }
+
+    numbers.push(String(num));
+  }
+
+  return [...new Set(numbers)];
+}
+
+function setSessionState(userId, mode) {
   if (!userId) return;
-  bookingStates.set(userId, {
+  sessionStates.set(userId, {
     mode,
-    expiresAt: Date.now() + CONFIG.SYSTEM.BOOKING_STATE_TTL_MS
+    expiresAt: Date.now() + CONFIG.SYSTEM.STATE_TTL_MS
   });
 }
 
-function getBookingState(userId) {
+function getSessionState(userId) {
   if (!userId) return null;
-  const state = bookingStates.get(userId);
+
+  const state = sessionStates.get(userId);
   if (!state) return null;
 
   if (Date.now() > state.expiresAt) {
-    bookingStates.delete(userId);
+    sessionStates.delete(userId);
     return null;
   }
 
   return state;
 }
 
-function clearBookingState(userId) {
+function clearSessionState(userId) {
   if (!userId) return;
-  bookingStates.delete(userId);
+  sessionStates.delete(userId);
 }
 
 function setPaymentTracking(userId, payload) {
   if (!userId) return;
   paymentTracking.set(userId, {
     ...payload,
-    expiresAt: Date.now() + CONFIG.SYSTEM.BOOKING_STATE_TTL_MS
+    expiresAt: Date.now() + CONFIG.SYSTEM.STATE_TTL_MS
   });
 }
 
@@ -304,6 +332,43 @@ async function enqueueBooking(task) {
   return run;
 }
 
+function parseAddressTemplate(text) {
+  const input = String(text || "").trim();
+
+  const recipientMatch = input.match(/ชื่อผู้รับ\s*:\s*(.+)/i);
+  const phoneMatch = input.match(/เบอร์โทร\s*:\s*(.+)/i);
+  const addressMatch = input.match(/ที่อยู่\s*:\s*([\s\S]+)/i);
+
+  if (!recipientMatch || !phoneMatch || !addressMatch) {
+    return null;
+  }
+
+  const recipient = recipientMatch[1].trim();
+  const phone = phoneMatch[1].trim();
+  const address = addressMatch[1].trim();
+
+  if (!recipient || !phone || !address) {
+    return null;
+  }
+
+  const onlyDigits = phone.replace(/\D/g, "");
+  if (onlyDigits.length < 9 || onlyDigits.length > 15) {
+    return null;
+  }
+
+  return {
+    recipient,
+    phone,
+    address
+  };
+}
+
+function formatAddressBlock(addressData) {
+  return `ชื่อผู้รับ: ${addressData.recipient}
+เบอร์โทร: ${addressData.phone}
+ที่อยู่: ${addressData.address}`;
+}
+
 // =========================
 // FETCH HELPERS
 // =========================
@@ -324,12 +389,12 @@ async function fetchText(url) {
 }
 
 // =========================
-// GOOGLE HELPERS
+// GOOGLE SHEETS HELPERS
 // =========================
 function ensureGoogleEnabled() {
-  if (!sheets || !drive) {
+  if (!sheets) {
     throw new Error(
-      "Google system is not configured. Please set GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY."
+      "Google Sheets system is not configured. Please set GOOGLE_SERVICE_ACCOUNT_EMAIL and GOOGLE_PRIVATE_KEY."
     );
   }
 }
@@ -399,76 +464,6 @@ async function getLineProfile(userId) {
   }
 
   return JSON.parse(body);
-}
-
-async function downloadLineImageBuffer(messageId) {
-  const res = await withTimeout(
-    fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${CONFIG.LINE.TOKEN}`
-      }
-    })
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Download LINE image failed ${res.status}: ${body}`);
-  }
-
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
-
-async function uploadSlipToDrive(buffer, fileName) {
-  ensureGoogleEnabled();
-
-  if (!CONFIG.GOOGLE.DRIVE_FOLDER_ID) {
-    throw new Error("Missing GOOGLE_DRIVE_FOLDER_ID");
-  }
-
-  const stream = Readable.from(buffer);
-
-  const createRes = await withTimeout(
-    drive.files.create({
-      requestBody: {
-        name: fileName,
-        parents: [CONFIG.GOOGLE.DRIVE_FOLDER_ID]
-      },
-      media: {
-        mimeType: "image/jpeg",
-        body: stream
-      },
-      fields: "id, webViewLink, webContentLink",
-      supportsAllDrives: true
-    })
-  );
-
-  const fileId = createRes.data.id;
-
-  await withTimeout(
-    drive.permissions.create({
-      fileId,
-      requestBody: {
-        role: "reader",
-        type: "anyone"
-      },
-      supportsAllDrives: true
-    })
-  );
-
-  const file = await withTimeout(
-    drive.files.get({
-      fileId,
-      fields: "id, webViewLink, webContentLink",
-      supportsAllDrives: true
-    })
-  );
-
-  return {
-    fileId: file.data.id,
-    url: file.data.webViewLink || file.data.webContentLink || ""
-  };
 }
 
 async function reply(replyToken, messages) {
@@ -630,7 +625,7 @@ async function loadCustomers(forceRefresh = false) {
     return cache.customers.data;
   }
 
-  const rows = await getSheetValues(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:D`);
+  const rows = await getSheetValues(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:E`);
   const customers = [];
 
   for (let i = 1; i < rows.length; i++) {
@@ -639,6 +634,7 @@ async function loadCustomers(forceRefresh = false) {
     const userId = String(row[1] || "").trim();
     const latestName = String(row[2] || "").trim();
     const createdAt = String(row[3] || "").trim();
+    const shippingAddress = String(row[4] || "").trim();
 
     if (!customerNo && !userId) continue;
 
@@ -647,7 +643,8 @@ async function loadCustomers(forceRefresh = false) {
       customerNo,
       userId,
       latestName,
-      createdAt
+      createdAt,
+      shippingAddress
     });
   }
 
@@ -664,20 +661,25 @@ async function getOrCreateCustomer(userId, displayName) {
   if (userId) {
     const found = customers.find((c) => c.userId === userId);
     if (found) {
+      const updates = [];
       if (displayName && found.latestName !== displayName) {
-        await updateSheetValuesBatch([
-          {
-            range: `${CONFIG.SHEETS.CUSTOMER.NAME}!C${found.rowNumber}`,
-            values: [[displayName]]
-          }
-        ]);
+        updates.push({
+          range: `${CONFIG.SHEETS.CUSTOMER.NAME}!C${found.rowNumber}`,
+          values: [[displayName]]
+        });
+      }
+
+      if (updates.length > 0) {
+        await updateSheetValuesBatch(updates);
         await loadCustomers(true);
       }
 
       return {
+        rowNumber: found.rowNumber,
         customerNo: found.customerNo,
         userId: found.userId,
-        displayName: displayName || found.latestName || "ลูกค้า"
+        displayName: displayName || found.latestName || "ลูกค้า",
+        shippingAddress: found.shippingAddress || ""
       };
     }
   }
@@ -690,19 +692,46 @@ async function getOrCreateCustomer(userId, displayName) {
   const nextNo = padCustomerNo(maxNo + 1);
   const nowText = nowLocalText();
 
-  await appendSheetRow(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:D`, [
+  await appendSheetRow(`${CONFIG.SHEETS.CUSTOMER.NAME}!A:E`, [
     nextNo,
     userId || "",
     displayName || "ลูกค้า",
-    nowText
+    nowText,
+    ""
   ]);
 
-  await loadCustomers(true);
+  const refreshed = await loadCustomers(true);
+  const created = refreshed.find((c) => c.customerNo === nextNo);
 
   return {
+    rowNumber: created?.rowNumber || "",
     customerNo: nextNo,
     userId: userId || "",
-    displayName: displayName || "ลูกค้า"
+    displayName: displayName || "ลูกค้า",
+    shippingAddress: ""
+  };
+}
+
+async function saveCustomerShippingAddress(userId, addressBlock, displayName = "ลูกค้า") {
+  const customer = await getOrCreateCustomer(userId, displayName);
+
+  if (!customer.rowNumber) {
+    throw new Error("Customer row not found");
+  }
+
+  await updateSheetValuesBatch([
+    {
+      range: `${CONFIG.SHEETS.CUSTOMER.NAME}!E${customer.rowNumber}`,
+      values: [[addressBlock]]
+    }
+  ]);
+
+  const refreshed = await loadCustomers(true);
+  const updated = refreshed.find((c) => c.customerNo === customer.customerNo);
+
+  return {
+    ...customer,
+    shippingAddress: updated?.shippingAddress || addressBlock
   };
 }
 
@@ -746,25 +775,57 @@ function buildAllBookedSpotsText(spots) {
   return lines.join("\n");
 }
 
-async function reserveSpots({ qty, displayName }) {
+async function reserveSpecificSpots({ spotNumbers, displayName }) {
   return enqueueBooking(async () => {
     const spots = await loadSpotSheet(true);
-    const availableSpots = getAvailableSpots(spots);
 
-    if (availableSpots.length === 0) {
-      return { ok: false, message: "สปอตเต็ม" };
+    const spotMap = new Map(
+      spots.map((spot) => [String(spot.spotNumber), spot])
+    );
+
+    const invalidSpots = [];
+    const occupiedSpots = [];
+    const selectedSpots = [];
+
+    for (const spotNo of spotNumbers) {
+      const spot = spotMap.get(String(spotNo));
+
+      if (!spot) {
+        invalidSpots.push(String(spotNo));
+        continue;
+      }
+
+      if (spot.name) {
+        occupiedSpots.push(String(spotNo));
+        continue;
+      }
+
+      selectedSpots.push(spot);
     }
 
-    if (availableSpots.length < qty) {
+    if (invalidSpots.length > 0) {
       return {
         ok: false,
-        message: `สปอตคงเหลือไม่พอ ตอนนี้เหลือ ${availableSpots.length} สปอต`
+        message: `ไม่พบหมายเลขสปอต: ${invalidSpots.join(", ")}`
       };
     }
 
-    const selectedSpots = availableSpots.slice(0, qty);
+    if (occupiedSpots.length > 0) {
+      return {
+        ok: false,
+        message: `สปอตต่อไปนี้ถูกจองแล้ว: ${occupiedSpots.join(", ")}`
+      };
+    }
+
+    if (selectedSpots.length === 0) {
+      return {
+        ok: false,
+        message: "ไม่พบสปอตที่จองได้"
+      };
+    }
 
     const updates = [];
+
     for (const spot of selectedSpots) {
       updates.push({
         range: `${CONFIG.SHEETS.SPOT.NAME}!B${spot.rowNumber}`,
@@ -787,64 +848,33 @@ async function reserveSpots({ qty, displayName }) {
   });
 }
 
-async function markLatestBookingAsSlipSent(displayName) {
+async function markSpecificSpotsSlipSent(spotNumbersText) {
   const spots = await loadSpotSheet(true);
 
-  const rowsToUpdate = spots
-    .filter(
-      (spot) =>
-        spot.name === displayName &&
-        (!spot.paymentStatus || spot.paymentStatus === "รอชำระ")
-    )
-    .map((spot) => spot.rowNumber);
+  const targetNumbers = String(spotNumbersText || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
 
-  if (rowsToUpdate.length === 0) {
-    return { ok: false, message: "not_found" };
+  const updates = [];
+
+  for (const spot of spots) {
+    if (targetNumbers.includes(String(spot.spotNumber))) {
+      updates.push({
+        range: `${CONFIG.SHEETS.SPOT.NAME}!C${spot.rowNumber}`,
+        values: [["ส่งสลิปแล้ว"]]
+      });
+    }
   }
 
-  const updates = rowsToUpdate.map((rowNumber) => ({
-    range: `${CONFIG.SHEETS.SPOT.NAME}!C${rowNumber}`,
-    values: [["ส่งสลิปแล้ว"]]
-  }));
+  if (updates.length === 0) {
+    return { ok: false };
+  }
 
   await updateSheetValuesBatch(updates);
-  return { ok: true, count: rowsToUpdate.length };
-}
+  await loadSpotSheet(true);
 
-// =========================
-// LOG HELPERS
-// =========================
-async function appendOrderLog({
-  type,
-  customerNo,
-  userId,
-  displayName,
-  itemName,
-  detail,
-  qty,
-  unitPrice,
-  total,
-  spotNumbers,
-  slipStatus,
-  slipUrl,
-  note
-}) {
-  await appendSheetRow(`${CONFIG.SHEETS.LOG.NAME}!A:N`, [
-    nowLocalText(),
-    type || "",
-    customerNo || "",
-    userId || "",
-    displayName || "",
-    itemName || "",
-    detail || "",
-    qty != null ? String(qty) : "",
-    unitPrice != null ? String(unitPrice) : "",
-    total != null ? String(total) : "",
-    spotNumbers || "",
-    slipStatus || "",
-    slipUrl || "",
-    note || ""
-  ]);
+  return { ok: true };
 }
 
 // =========================
@@ -857,7 +887,7 @@ function buildCampaignIntroText(campaign) {
     lines.push("🎯 รายการจองปัจจุบัน");
     lines.push(campaign.title);
   } else {
-    lines.push("🎯 ระบบจองสปอตสุ่ม");
+    lines.push("🎯 ระบบจองสปอต");
   }
 
   if (campaign.price > 0) {
@@ -1018,7 +1048,78 @@ async function calculate(text) {
 }
 
 // =========================
-// HANDLERS
+// ADDRESS HANDLERS
+// =========================
+async function handleAddressInput(replyToken, userId, text, mode) {
+  if (text.trim() === "ยกเลิก") {
+    clearSessionState(userId);
+    await reply(replyToken, [
+      { type: "text", text: "ยกเลิกการกรอกข้อมูลที่อยู่แล้ว" }
+    ]);
+    return;
+  }
+
+  const parsed = parseAddressTemplate(text);
+
+  if (!parsed) {
+    await reply(replyToken, [
+      {
+        type: "text",
+        text: `ข้อมูลยังไม่ครบ กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งของคุณให้ครบถ้วน
+
+${getAddressTemplateText()}`
+      }
+    ]);
+    return;
+  }
+
+  let displayName = "ลูกค้า";
+
+  try {
+    if (userId) {
+      const profile = await getLineProfile(userId);
+      displayName = profile.displayName || "ลูกค้า";
+    }
+  } catch (err) {
+    logError("Get profile error:", err.message);
+  }
+
+  const addressBlock = formatAddressBlock(parsed);
+  await saveCustomerShippingAddress(userId, addressBlock, displayName);
+  clearSessionState(userId);
+
+  if (mode === "address_create") {
+    await reply(replyToken, [
+      {
+        type: "text",
+        text: `บันทึกที่อยู่จัดส่งเรียบร้อยแล้ว
+
+กรุณาตรวจสอบข้อมูลของคุณอีกครั้ง
+
+${addressBlock}`
+      },
+      {
+        type: "text",
+        text: "หากข้อมูลถูกต้องแล้ว กรุณาส่งรายการสั่งซื้ออีกครั้ง"
+      }
+    ]);
+    return;
+  }
+
+  await reply(replyToken, [
+    {
+      type: "text",
+      text: `แก้ไขที่อยู่จัดส่งเรียบร้อยแล้ว
+
+กรุณาตรวจสอบข้อมูลล่าสุดของคุณอีกครั้ง
+
+${addressBlock}`
+    }
+  ]);
+}
+
+// =========================
+// MESSAGE HANDLERS
 // =========================
 async function handlePriceList(replyToken) {
   const table = await loadPrices();
@@ -1080,28 +1181,39 @@ async function handleSpotBookingStart(replyToken, userId) {
   });
 
   if (availableCount <= 0) {
-    clearBookingState(userId);
+    clearSessionState(userId);
     messages.push({ type: "text", text: "สปอตเต็ม" });
     await reply(replyToken, messages);
     return;
   }
 
-  setBookingState(userId, "spot_booking");
+  setSessionState(userId, "spot_booking");
 
   messages.push({
     type: "text",
-    text: "หากต้องการจองสปอต ให้พิมพ์จำนวนสปอตที่ต้องการจอง เช่น 2"
+    text: `หากต้องการจอง กรุณาพิมพ์หมายเลขสปอตที่ต้องการ
+ตัวอย่าง:
+2,3,7
+1,3
+5`
   });
 
   await reply(replyToken, messages);
 }
 
-async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
-  const qty = Number(qtyText);
+async function handleSpotBookingSelection(replyToken, userId, text) {
+  const spotNumbers = parseSpotNumbers(text);
 
-  if (!Number.isInteger(qty) || qty <= 0) {
+  if (!spotNumbers || spotNumbers.length === 0) {
     await reply(replyToken, [
-      { type: "text", text: "กรุณาพิมพ์เป็นตัวเลขจำนวนสปอต เช่น 1 หรือ 2" }
+      {
+        type: "text",
+        text: `กรุณาพิมพ์หมายเลขสปอตให้ถูกต้อง
+ตัวอย่าง:
+2,3,7
+1,3
+5`
+      }
     ]);
     return;
   }
@@ -1121,14 +1233,19 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
   displayName = customer.displayName;
 
   const campaign = await loadCampaign(true);
-  const result = await reserveSpots({ qty, displayName });
-  clearBookingState(userId);
+  const result = await reserveSpecificSpots({
+    spotNumbers,
+    displayName
+  });
+
+  clearSessionState(userId);
 
   if (!result.ok) {
     await reply(replyToken, [{ type: "text", text: result.message }]);
     return;
   }
 
+  const qty = result.spots.length;
   const total = (campaign.price || 0) * qty;
 
   if (userId) {
@@ -1138,7 +1255,7 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
       userId,
       displayName,
       itemName: campaign.title || "รายการจองสปอต",
-      detail: "จองสปอต",
+      detail: "จองสปอตตามหมายเลข",
       qty,
       unitPrice: campaign.price || 0,
       total,
@@ -1149,7 +1266,7 @@ async function handleSpotBookingQuantity(replyToken, userId, qtyText) {
   await reply(replyToken, [
     {
       type: "text",
-      text: `✅ จองสำเร็จ ${qty} สปอต
+      text: `✅ จองสำเร็จ
 ชื่อ: ${displayName}
 รหัสลูกค้า: ${customer.customerNo}
 หมายเลขสปอต: ${result.spots.join(", ")}`
@@ -1173,9 +1290,7 @@ K-Bank 0503228092
 
 True Wallet 0982652650
 
-✨ ชำระแล้วโปรดส่ง Pay Slip การโอนในแชตนี้ ✨
-
-เมื่อคุณส่งรูปสลิป ระบบจะบันทึกสถานะเป็น "ส่งสลิปแล้ว" เพื่อรอตรวจสอบ`
+✨ ชำระแล้วโปรดส่ง Pay Slip การโอนในแชตนี้ ✨`
     },
     {
       type: "text",
@@ -1188,101 +1303,8 @@ ${campaign.title || "รายการจองสปอต"}
   ]);
 }
 
-async function handleSlipImage(replyToken, userId, messageId) {
-  let displayName = "ลูกค้า";
-
-  try {
-    if (userId) {
-      const profile = await getLineProfile(userId);
-      displayName = profile.displayName || "ลูกค้า";
-    }
-  } catch (err) {
-    logError("Get profile error:", err.message);
-  }
-
-  const customer = await getOrCreateCustomer(userId, displayName);
-  const payment = getPaymentTracking(userId);
-
-  let slipUrl = "";
-  try {
-    if (messageId && CONFIG.GOOGLE.DRIVE_FOLDER_ID) {
-      const buffer = await downloadLineImageBuffer(messageId);
-      const uploaded = await uploadSlipToDrive(
-        buffer,
-        `slip_${customer.customerNo}_${Date.now()}.jpg`
-      );
-      slipUrl = uploaded.url || "";
-    }
-  } catch (err) {
-    logError("Upload slip error:", err.message);
-  }
-
-  if (!payment) {
-    await appendOrderLog({
-      type: "normal_order",
-      customerNo: customer.customerNo,
-      userId: customer.userId,
-      displayName: customer.displayName,
-      itemName: "",
-      detail: "ลูกค้าส่งสลิป แต่ไม่พบรายการ tracking ล่าสุด",
-      qty: "",
-      unitPrice: "",
-      total: "",
-      spotNumbers: "",
-      slipStatus: "ส่งสลิปแล้ว",
-      slipUrl,
-      note: "รอแอดมินตรวจสอบ"
-    });
-
-    await reply(replyToken, [
-      {
-        type: "text",
-        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
-      }
-    ]);
-    return;
-  }
-
-  if (payment.type === "spot_booking") {
-    const markResult = await markLatestBookingAsSlipSent(payment.displayName);
-    if (!markResult.ok) {
-      logError("Mark booking slip status failed:", markResult.message);
-    }
-  }
-
-  await appendOrderLog({
-    type: payment.type,
-    customerNo: payment.customerNo || customer.customerNo,
-    userId: payment.userId || customer.userId,
-    displayName: payment.displayName || customer.displayName,
-    itemName: payment.itemName || "",
-    detail: payment.detail || "",
-    qty: payment.qty != null ? payment.qty : "",
-    unitPrice: payment.unitPrice != null ? payment.unitPrice : "",
-    total: payment.total != null ? payment.total : "",
-    spotNumbers: payment.spotNumbers || "",
-    slipStatus: "ส่งสลิปแล้ว",
-    slipUrl,
-    note: "รอแอดมินตรวจสอบ"
-  });
-
-  clearPaymentTracking(userId);
-
-  await reply(replyToken, [
-    {
-      type: "text",
-      text: `📩 ได้รับรูปสลิปแล้ว
-ชื่อ: ${payment.displayName || customer.displayName}
-รหัสลูกค้า: ${payment.customerNo || customer.customerNo}
-
-ระบบได้บันทึกข้อมูลเรียบร้อย กรุณารอแอดมินตรวจสอบ`
-    }
-  ]);
-}
-
 async function handleOrder(replyToken, userId, text) {
   const result = await calculate(text);
-
   if (!result) return false;
 
   if (result.status === "guide") {
@@ -1295,45 +1317,59 @@ async function handleOrder(replyToken, userId, text) {
     return true;
   }
 
-  if (result.status === "success") {
-    let displayName = "ลูกค้า";
+  let displayName = "ลูกค้า";
 
-    try {
-      if (userId) {
-        const profile = await getLineProfile(userId);
-        displayName = profile.displayName || "ลูกค้า";
-      }
-    } catch (err) {
-      logError("Get profile error:", err.message);
-    }
-
-    const customer = await getOrCreateCustomer(userId, displayName);
-
+  try {
     if (userId) {
-      setPaymentTracking(userId, {
-        type: "normal_order",
-        customerNo: customer.customerNo,
-        userId,
-        displayName: customer.displayName,
-        itemName: "คำสั่งซื้อสินค้า",
-        detail: result.detailLines.map((x) => x.text).join(" | "),
-        qty: result.detailLines.reduce((sum, x) => sum + Number(x.qty || 0), 0),
-        unitPrice: "",
-        total: result.total,
-        spotNumbers: ""
-      });
+      const profile = await getLineProfile(userId);
+      displayName = profile.displayName || "ลูกค้า";
     }
+  } catch (err) {
+    logError("Get profile error:", err.message);
+  }
 
+  const customer = await getOrCreateCustomer(userId, displayName);
+
+  if (!customer.shippingAddress) {
+    setSessionState(userId, "address_create");
     await reply(replyToken, [
-      { type: "text", text: result.payment },
-      {
-        type: "image",
-        originalContentUrl: CONFIG.PAYMENT.IMAGE_URL,
-        previewImageUrl: CONFIG.PAYMENT.IMAGE_URL
-      },
       {
         type: "text",
-        text: `สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
+        text: `ยังไม่พบข้อมูลที่อยู่จัดส่งของคุณ
+
+กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งของคุณให้ครบถ้วน
+
+${getAddressTemplateText()}`
+      }
+    ]);
+    return true;
+  }
+
+  if (userId) {
+    setPaymentTracking(userId, {
+      type: "normal_order",
+      customerNo: customer.customerNo,
+      userId,
+      displayName: customer.displayName,
+      itemName: "คำสั่งซื้อสินค้า",
+      detail: result.detailLines.map((x) => x.text).join(" | "),
+      qty: result.detailLines.reduce((sum, x) => sum + Number(x.qty || 0), 0),
+      unitPrice: "",
+      total: result.total,
+      spotNumbers: ""
+    });
+  }
+
+  await reply(replyToken, [
+    { type: "text", text: result.payment },
+    {
+      type: "image",
+      originalContentUrl: CONFIG.PAYMENT.IMAGE_URL,
+      previewImageUrl: CONFIG.PAYMENT.IMAGE_URL
+    },
+    {
+      type: "text",
+      text: `สามารถชำระเงินผ่านช่องทางอื่น ๆ ได้ดังนี้
 
 ชื่อบัญชี ปรัชญา สุดใจดี
 
@@ -1343,15 +1379,49 @@ True Wallet 0982652650
 
 ✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨
 
-รหัสลูกค้า: ${customer.customerNo}`
-      },
-      { type: "text", text: result.summary }
-    ]);
+รหัสลูกค้า: ${customer.customerNo}
+ที่อยู่จัดส่งปัจจุบัน:
+${customer.shippingAddress}`
+    },
+    { type: "text", text: result.summary }
+  ]);
 
-    return true;
+  return true;
+}
+
+async function handleSlipImage(replyToken, userId) {
+  const payment = getPaymentTracking(userId);
+
+  if (!payment) {
+    await reply(replyToken, [
+      {
+        type: "text",
+        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
+      }
+    ]);
+    return;
   }
 
-  return false;
+  if (payment.type === "spot_booking" && payment.spotNumbers) {
+    try {
+      await markSpecificSpotsSlipSent(payment.spotNumbers);
+    } catch (err) {
+      logError("Mark spot slip status error:", err.message);
+    }
+  }
+
+  clearPaymentTracking(userId);
+
+  await reply(replyToken, [
+    {
+      type: "text",
+      text: `📩 ได้รับรูปสลิปแล้ว
+ชื่อ: ${payment.displayName}
+รหัสลูกค้า: ${payment.customerNo}
+
+กรุณารอแอดมินตรวจสอบ`
+    }
+  ]);
 }
 
 // =========================
@@ -1383,7 +1453,6 @@ app.get("/health", async (req, res) => {
       availableSpots: getAvailableSpots(spots).length,
       totalCustomers: customers.length,
       bookingEnabled: hasGoogleConfig,
-      driveEnabled: !!CONFIG.GOOGLE.DRIVE_FOLDER_ID,
       campaign
     });
   } catch (err) {
@@ -1409,7 +1478,7 @@ app.post("/webhook", async (req, res) => {
         const userId = event.source?.userId || "";
 
         if (event.message.type === "image") {
-          await handleSlipImage(replyToken, userId, event.message.id);
+          await handleSlipImage(replyToken, userId);
           continue;
         }
 
@@ -1417,6 +1486,36 @@ app.post("/webhook", async (req, res) => {
 
         const text = String(event.message.text || "").trim();
         logInfo("Incoming text:", text, "userId:", userId || "(empty)");
+
+        const currentState = getSessionState(userId);
+
+        if (currentState?.mode === "address_create") {
+          await handleAddressInput(replyToken, userId, text, "address_create");
+          continue;
+        }
+
+        if (currentState?.mode === "address_update") {
+          await handleAddressInput(replyToken, userId, text, "address_update");
+          continue;
+        }
+
+        if (currentState?.mode === "spot_booking") {
+          await handleSpotBookingSelection(replyToken, userId, text);
+          continue;
+        }
+
+        if (text === "แก้ไขที่อยู่จัดส่ง") {
+          setSessionState(userId, "address_update");
+          await reply(replyToken, [
+            {
+              type: "text",
+              text: `กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งใหม่ของคุณให้ครบถ้วน
+
+${getAddressTemplateText()}`
+            }
+          ]);
+          continue;
+        }
 
         if (text === "ราคาสินค้า") {
           await handlePriceList(replyToken);
@@ -1430,12 +1529,6 @@ app.post("/webhook", async (req, res) => {
 
         if (text === "จองสปอตสุ่ม") {
           await handleSpotBookingStart(replyToken, userId);
-          continue;
-        }
-
-        const bookingState = getBookingState(userId);
-        if (bookingState?.mode === "spot_booking" && isPositiveIntegerText(text)) {
-          await handleSpotBookingQuantity(replyToken, userId, text);
           continue;
         }
 
@@ -1469,7 +1562,6 @@ app.post("/webhook", async (req, res) => {
 // =========================
 app.listen(CONFIG.PORT, () => {
   logInfo(`✅ Server running on port ${CONFIG.PORT}`);
-  logInfo("LOG_SHEET_NAME =", CONFIG.SHEETS.LOG.NAME);
   logInfo("CUSTOMER_SHEET_NAME =", CONFIG.SHEETS.CUSTOMER.NAME);
-  logInfo("DRIVE_ENABLED =", !!CONFIG.GOOGLE.DRIVE_FOLDER_ID);
+  logInfo("SPOT_SHEET_NAME =", CONFIG.SHEETS.SPOT.NAME);
 });
