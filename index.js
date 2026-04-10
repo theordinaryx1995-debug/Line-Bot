@@ -31,6 +31,7 @@ const CONFIG = {
   CAMPAIGN_SHEET_NAME: process.env.CAMPAIGN_SHEET_NAME || "ชีต4",
   LOG_SHEET_NAME: process.env.LOG_SHEET_NAME || "ชีต5",
   CUSTOMER_SHEET_NAME: process.env.CUSTOMER_SHEET_NAME || "ชีต6",
+  TRACKING_SHEET_NAME: process.env.TRACKING_SHEET_NAME || "ชีต7",
 
   GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "",
   GOOGLE_PRIVATE_KEY: process.env.GOOGLE_PRIVATE_KEY
@@ -104,12 +105,13 @@ const cache = {
   spots: { data: null, fetchedAt: 0 },
   campaign: { data: null, fetchedAt: 0 },
   customers: { data: null, fetchedAt: 0 },
-  slipIds: { data: null, fetchedAt: 0 }
+  slipIds: { data: null, fetchedAt: 0 },
+  trackingLatest: { data: null, fetchedAt: 0 }
 };
 
-const sessionStates = new Map(); // userId => { mode, data, expiresAt }
-const paymentTracking = new Map(); // userId => { ..., expiresAt }
-const recentSlipMessageIds = new Map(); // line image messageId => expiresAt
+const sessionStates = new Map();
+const paymentTracking = new Map();
+const recentSlipMessageIds = new Map();
 
 let bookingQueue = Promise.resolve();
 
@@ -134,6 +136,10 @@ setInterval(() => {
 // =========================================================
 function nowISO() {
   return new Date().toISOString();
+}
+
+function nowLocalDate() {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Bangkok" });
 }
 
 function nowLocalText() {
@@ -270,6 +276,19 @@ function getSpotSelectionPromptText() {
 5`;
 }
 
+function getMenuText() {
+  return `คำสั่งที่ใช้ได้:
+- เมนู
+- ราคาสินค้า
+- รวมราคา
+- Check Rate
+- จองสปอตสุ่ม
+- แก้ไขที่อยู่จัดส่ง
+- เช็คพัสดุ
+
+หากต้องการสอบถามกับร้าน สามารถพิมพ์ข้อความได้ตามปกติ`;
+}
+
 function padCustomerNo(num) {
   return String(num).padStart(4, "0");
 }
@@ -277,6 +296,45 @@ function padCustomerNo(num) {
 function verifyAdmin(req) {
   const key = req.query.key || req.headers["x-admin-key"];
   return !!CONFIG.ADMIN_KEY && key === CONFIG.ADMIN_KEY;
+}
+
+function buildNote(parts = {}) {
+  const lines = [];
+
+  for (const [key, value] of Object.entries(parts)) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      lines.push(`${key}=${String(value).trim()}`);
+    }
+  }
+
+  return lines.join(" | ");
+}
+
+function formatThaiDateLong(date = new Date()) {
+  const months = [
+    "มกราคม",
+    "กุมภาพันธ์",
+    "มีนาคม",
+    "เมษายน",
+    "พฤษภาคม",
+    "มิถุนายน",
+    "กรกฎาคม",
+    "สิงหาคม",
+    "กันยายน",
+    "ตุลาคม",
+    "พฤศจิกายน",
+    "ธันวาคม"
+  ];
+
+  const d = new Date(
+    date.toLocaleString("en-US", { timeZone: "Asia/Bangkok" })
+  );
+
+  const day = d.getDate();
+  const month = months[d.getMonth()];
+  const year = d.getFullYear();
+
+  return `${day} ${month} ${year}`;
 }
 
 // =========================================================
@@ -605,6 +663,35 @@ async function loadRecentSlipMessageIds(forceRefresh = false) {
   return ids;
 }
 
+async function loadLatestTrackingImage(forceRefresh = false) {
+  const age = Date.now() - cache.trackingLatest.fetchedAt;
+  if (!forceRefresh && cache.trackingLatest.data && age < CONFIG.CACHE_TTL_MS) {
+    return cache.trackingLatest.data;
+  }
+
+  const rows = await getSheetValues(`${CONFIG.TRACKING_SHEET_NAME}!A:A`);
+
+  let latest = null;
+
+  for (let i = rows.length - 1; i >= 1; i--) {
+    const value = String(rows[i]?.[0] || "").trim();
+    if (!value) continue;
+
+    latest = {
+      rowNumber: i + 1,
+      imageUrl: value
+    };
+    break;
+  }
+
+  cache.trackingLatest = {
+    data: latest,
+    fetchedAt: Date.now()
+  };
+
+  return latest;
+}
+
 // =========================================================
 // CUSTOMER MASTER
 // =========================================================
@@ -720,20 +807,6 @@ async function saveCustomerShippingAddress(userId, addressBlock, displayName = "
 
 // =========================================================
 // LOG HELPERS - ชีต5 A:N
-// A วันที่เวลา
-// B ประเภท
-// C Customer_No
-// D User_ID
-// E ชื่อลูกค้า
-// F รายการ
-// G รายละเอียด
-// H จำนวน
-// I ราคาต่อหน่วย
-// J ยอดรวม
-// K เลขสปอต
-// L สถานะสลิป
-// M Slip_URL
-// N หมายเหตุ
 // =========================================================
 async function appendOrderLog({
   type = "",
@@ -766,18 +839,6 @@ async function appendOrderLog({
     slipUrl,
     note
   ]);
-}
-
-function buildNote(parts = {}) {
-  const lines = [];
-
-  for (const [key, value] of Object.entries(parts)) {
-    if (value !== undefined && value !== null && String(value).trim() !== "") {
-      lines.push(`${key}=${String(value).trim()}`);
-    }
-  }
-
-  return lines.join(" | ");
 }
 
 // =========================================================
@@ -1421,6 +1482,42 @@ ${getAddressTemplateText()}`
 }
 
 // =========================================================
+// TRACKING
+// =========================================================
+async function buildTrackingMessages() {
+  const latest = await loadLatestTrackingImage(true);
+
+  if (!latest || !latest.imageUrl) {
+    return [
+      {
+        type: "text",
+        text: "ยังไม่พบข้อมูลพัสดุในระบบ กรุณาติดต่อร้าน"
+      }
+    ];
+  }
+
+  const dateText = formatThaiDateLong(new Date());
+
+  return [
+    {
+      type: "text",
+      text: `📦 สถานะพัสดุอัปเดตล่าสุด
+จัดส่งวันที่ ${dateText}
+
+รายการพัสดุอยู่ในภาพด้านล่าง
+กรุณาเลื่อนดูและค้นหาชื่อของคุณได้เลย
+
+หากไม่พบ กรุณาทักแชตร้านได้ทันที`
+    },
+    {
+      type: "image",
+      originalContentUrl: latest.imageUrl,
+      previewImageUrl: latest.imageUrl
+    }
+  ];
+}
+
+// =========================================================
 // DUPLICATE SLIP CHECK
 // =========================================================
 async function isDuplicateSlipMessageId(messageId) {
@@ -1444,17 +1541,19 @@ function markRecentSlipMessageId(messageId) {
 // ADMIN DASHBOARD
 // =========================================================
 async function getAdminSummary() {
-  const [prices, stock, spots, campaign, customers, logRows] = await Promise.all([
-    loadPrices(),
-    loadStock(),
-    loadSpotSheet(true),
-    loadCampaign(true),
-    loadCustomers(true),
-    getSheetValues(`${CONFIG.LOG_SHEET_NAME}!A:N`)
-  ]);
+  const [prices, stock, spots, campaign, customers, logRows, trackingLatest] =
+    await Promise.all([
+      loadPrices(),
+      loadStock(),
+      loadSpotSheet(true),
+      loadCampaign(true),
+      loadCustomers(true),
+      getSheetValues(`${CONFIG.LOG_SHEET_NAME}!A:N`),
+      loadLatestTrackingImage(true)
+    ]);
 
   const dataRows = logRows.slice(1);
-  const today = nowLocalText().slice(0, 10);
+  const today = nowLocalDate();
 
   let pendingPayments = 0;
   let slipsReceivedToday = 0;
@@ -1486,7 +1585,8 @@ async function getAdminSummary() {
     bookedSpots: spots.filter((x) => x.name).length,
     totalCustomers: customers.length,
     pendingPayments,
-    slipsReceivedToday
+    slipsReceivedToday,
+    trackingLatestRow: trackingLatest?.rowNumber || "-"
   };
 }
 
@@ -1523,6 +1623,7 @@ h1{margin:0 0 16px}
   <div class="card"><div class="label">Customers</div><div class="value">${summary.totalCustomers}</div></div>
   <div class="card"><div class="label">Pending Payments</div><div class="value">${summary.pendingPayments}</div></div>
   <div class="card"><div class="label">Slips Today</div><div class="value">${summary.slipsReceivedToday}</div></div>
+  <div class="card"><div class="label">Tracking Latest Row</div><div class="value">${summary.trackingLatestRow}</div></div>
 </div>
 </body>
 </html>
@@ -1893,6 +1994,11 @@ async function handleOrder(replyToken, userId, text) {
   return true;
 }
 
+async function handleTracking(replyToken) {
+  const messages = await buildTrackingMessages();
+  await reply(replyToken, messages);
+}
+
 async function handleSlipImage(replyToken, userId, messageId) {
   const isDuplicate = await isDuplicateSlipMessageId(messageId);
 
@@ -1986,7 +2092,7 @@ async function handleSlipImage(replyToken, userId, messageId) {
 }
 
 // =========================================================
-// ROUTES
+// ADMIN DASHBOARD
 // =========================================================
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -2056,6 +2162,9 @@ app.get("/admin/api/summary", async (req, res) => {
   }
 });
 
+// =========================================================
+// WEBHOOK
+// =========================================================
 app.post("/webhook", async (req, res) => {
   try {
     const events = req.body?.events || [];
@@ -2101,16 +2210,8 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
 
-        if (text === "แก้ไขที่อยู่จัดส่ง") {
-          setSessionState(userId, "address_update");
-          await reply(replyToken, [
-            {
-              type: "text",
-              text: `กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งใหม่ของคุณให้ครบถ้วน
-
-${getAddressTemplateText()}`
-            }
-          ]);
+        if (text === "เมนู" || /^help$/i.test(text)) {
+          await reply(replyToken, [{ type: "text", text: getMenuText() }]);
           continue;
         }
 
@@ -2129,22 +2230,28 @@ ${getAddressTemplateText()}`
           continue;
         }
 
+        if (text === "แก้ไขที่อยู่จัดส่ง") {
+          setSessionState(userId, "address_update");
+          await reply(replyToken, [
+            {
+              type: "text",
+              text: `กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งใหม่ของคุณให้ครบถ้วน
+
+${getAddressTemplateText()}`
+            }
+          ]);
+          continue;
+        }
+
+        if (text === "เช็คพัสดุ") {
+          await handleTracking(replyToken);
+          continue;
+        }
+
         const handled = await handleOrder(replyToken, userId, text);
         if (handled) continue;
 
-        await reply(replyToken, [
-          {
-            type: "text",
-            text: `ไม่พบคำสั่งที่ตรงกัน
-
-คำสั่งที่ใช้ได้:
-- ราคาสินค้า
-- รวมราคา
-- Check Rate
-- จองสปอตสุ่ม
-- แก้ไขที่อยู่จัดส่ง`
-          }
-        ]);
+        // ไม่ตอบ fallback เพื่อให้ลูกค้าคุยกับร้านแบบปกติได้
       } catch (eventErr) {
         logError("Event handling error:", eventErr.message);
 
@@ -2202,5 +2309,6 @@ app.listen(CONFIG.PORT, () => {
   logInfo("CAMPAIGN_SHEET_NAME =", CONFIG.CAMPAIGN_SHEET_NAME);
   logInfo("LOG_SHEET_NAME =", CONFIG.LOG_SHEET_NAME);
   logInfo("CUSTOMER_SHEET_NAME =", CONFIG.CUSTOMER_SHEET_NAME);
+  logInfo("TRACKING_SHEET_NAME =", CONFIG.TRACKING_SHEET_NAME);
   logInfo("ADMIN enabled =", !!CONFIG.ADMIN_KEY);
 });
