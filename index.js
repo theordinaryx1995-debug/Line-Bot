@@ -1540,96 +1540,345 @@ function markRecentSlipMessageId(messageId) {
 // =========================================================
 // ADMIN DASHBOARD
 // =========================================================
-async function getAdminSummary() {
-  const [prices, stock, spots, campaign, customers, logRows, trackingLatest] =
-    await Promise.all([
-      loadPrices(),
-      loadStock(),
-      loadSpotSheet(true),
-      loadCampaign(true),
-      loadCustomers(true),
-      getSheetValues(`${CONFIG.LOG_SHEET_NAME}!A:N`),
-      loadLatestTrackingImage(true)
-    ]);
-
-  const dataRows = logRows.slice(1);
-  const today = nowLocalDate();
-
-  let pendingPayments = 0;
-  let slipsReceivedToday = 0;
-
-  for (const row of dataRows) {
-    const timestamp = String(row[0] || "");
-    const type = String(row[1] || "");
-    const slipStatus = String(row[11] || "");
-
-    if (
-      (type === "normal_order" || type === "spot_booking") &&
-      slipStatus === "รอส่งสลิป"
-    ) {
-      pendingPayments += 1;
-    }
-
-    if (type === "payment_slip" && timestamp.startsWith(today)) {
-      slipsReceivedToday += 1;
-    }
-  }
-
-  return {
-    serviceTime: nowISO(),
-    campaign,
-    priceItems: Object.keys(prices).length,
-    stockModels: Object.keys(stock).length,
-    totalSpots: spots.length,
-    availableSpots: getAvailableSpots(spots).length,
-    bookedSpots: spots.filter((x) => x.name).length,
-    totalCustomers: customers.length,
-    pendingPayments,
-    slipsReceivedToday,
-    trackingLatestRow: trackingLatest?.rowNumber || "-"
-  };
-}
-
 function renderAdminHtml(summary) {
+  const campaignTitle = summary?.campaign?.title || "-";
+  const campaignPrice = formatBaht(summary?.campaign?.price || 0);
+  const campaignImage = summary?.campaign?.imageUrl || "";
+
   return `
 <!doctype html>
 <html lang="th">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>LINE Bot Admin</title>
+<title>ระบบการจอง SPOT TCG Ordinary</title>
 <style>
-body{font-family:Arial,sans-serif;background:#f6f7fb;margin:0;padding:24px;color:#222}
-h1{margin:0 0 16px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}
-.card{background:#fff;border-radius:16px;padding:18px;box-shadow:0 4px 18px rgba(0,0,0,.08)}
-.label{font-size:14px;color:#666;margin-bottom:8px}
-.value{font-size:28px;font-weight:700}
-.small{font-size:13px;color:#777}
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    color: #111827;
+    background:
+      radial-gradient(circle at top left, #dbeafe 0%, transparent 35%),
+      radial-gradient(circle at top right, #ede9fe 0%, transparent 30%),
+      linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 28px;
+  }
+
+  .hero {
+    display: grid;
+    grid-template-columns: 1.3fr 0.9fr;
+    gap: 24px;
+    align-items: stretch;
+    margin-bottom: 24px;
+  }
+
+  .hero-left {
+    background: rgba(255,255,255,0.82);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.7);
+    border-radius: 28px;
+    padding: 28px;
+    box-shadow: 0 20px 50px rgba(15, 23, 42, 0.10);
+  }
+
+  .hero-badge {
+    display: inline-block;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #111827, #374151);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    margin-bottom: 14px;
+  }
+
+  .hero-title {
+    margin: 0;
+    font-size: 42px;
+    line-height: 1.08;
+    font-weight: 800;
+    color: #0f172a;
+  }
+
+  .hero-subtitle {
+    margin: 14px 0 0;
+    font-size: 16px;
+    line-height: 1.7;
+    color: #475569;
+  }
+
+  .updated {
+    margin-top: 18px;
+    font-size: 13px;
+    color: #64748b;
+  }
+
+  .hero-right {
+    background: rgba(255,255,255,0.82);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.7);
+    border-radius: 28px;
+    padding: 18px;
+    box-shadow: 0 20px 50px rgba(15, 23, 42, 0.10);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 320px;
+    overflow: hidden;
+  }
+
+  .campaign-image {
+    width: 100%;
+    height: 100%;
+    min-height: 280px;
+    object-fit: cover;
+    border-radius: 22px;
+    display: block;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
+  }
+
+  .image-placeholder {
+    width: 100%;
+    min-height: 280px;
+    border-radius: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #e2e8f0, #f8fafc);
+    color: #64748b;
+    font-size: 18px;
+    font-weight: 700;
+    text-align: center;
+    padding: 24px;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(200px, 1fr));
+    gap: 18px;
+    margin-bottom: 28px;
+  }
+
+  .stat-card {
+    position: relative;
+    overflow: hidden;
+    background: rgba(255,255,255,0.88);
+    border: 1px solid rgba(255,255,255,0.7);
+    border-radius: 24px;
+    padding: 22px;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+  }
+
+  .stat-card::after {
+    content: "";
+    position: absolute;
+    inset: auto -30px -30px auto;
+    width: 110px;
+    height: 110px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(139,92,246,0.10));
+  }
+
+  .stat-label {
+    position: relative;
+    z-index: 1;
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+
+  .stat-value {
+    position: relative;
+    z-index: 1;
+    font-size: 38px;
+    line-height: 1;
+    font-weight: 800;
+    color: #0f172a;
+    word-break: break-word;
+  }
+
+  .campaign-title-card .stat-value {
+    font-size: 28px;
+    line-height: 1.25;
+  }
+
+  .spot-board {
+    background: rgba(255,255,255,0.88);
+    border: 1px solid rgba(255,255,255,0.7);
+    border-radius: 28px;
+    padding: 24px;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
+  }
+
+  .section-head h2 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    color: #0f172a;
+  }
+
+  .section-head p {
+    margin: 0 0 18px;
+    color: #64748b;
+    font-size: 14px;
+  }
+
+  .spot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 14px;
+  }
+
+  .spot-card {
+    border-radius: 20px;
+    padding: 18px 14px;
+    text-align: center;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+    border: 1px solid transparent;
+  }
+
+  .spot-card.empty {
+    background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+    border-color: #6ee7b7;
+  }
+
+  .spot-card.filled {
+    background: linear-gradient(135deg, #fee2e2, #fecaca);
+    border-color: #fca5a5;
+  }
+
+  .spot-no {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: #475569;
+    margin-bottom: 8px;
+  }
+
+  .spot-name {
+    font-size: 20px;
+    font-weight: 800;
+    color: #0f172a;
+    line-height: 1.25;
+    word-break: break-word;
+  }
+
+  .footer-note {
+    margin-top: 18px;
+    font-size: 13px;
+    color: #64748b;
+  }
+
+  @media (max-width: 1200px) {
+    .stats-grid {
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+    }
+  }
+
+  @media (max-width: 900px) {
+    .hero {
+      grid-template-columns: 1fr;
+    }
+
+    .hero-title {
+      font-size: 34px;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .container {
+      padding: 16px;
+    }
+
+    .stats-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .hero-title {
+      font-size: 28px;
+    }
+
+    .stat-value {
+      font-size: 32px;
+    }
+
+    .campaign-title-card .stat-value {
+      font-size: 24px;
+    }
+
+    .spot-grid {
+      grid-template-columns: repeat(2, minmax(120px, 1fr));
+    }
+  }
 </style>
 </head>
 <body>
-<h1>LINE Bot Admin Dashboard</h1>
-<p class="small">Updated: ${summary.serviceTime}</p>
+  <div class="container">
+    <section class="hero">
+      <div class="hero-left">
+        <div class="hero-badge">SPOT CAMPAIGN DASHBOARD</div>
+        <h1 class="hero-title">ระบบการจอง SPOT TCG Ordinary</h1>
+        <p class="hero-subtitle">
+          หน้าสรุปภาพรวมแคมเปญสำหรับติดตามจำนวนสปอต ราคา และสถานะการจองแบบเรียลไทม์
+        </p>
+        <div class="updated">Updated: ${summary.serviceTime}</div>
+      </div>
 
-<div class="grid">
-  <div class="card"><div class="label">Campaign</div><div class="value">${summary.campaign.title || "-"}</div></div>
-  <div class="card"><div class="label">Campaign Price</div><div class="value">${formatBaht(summary.campaign.price)} ฿</div></div>
-  <div class="card"><div class="label">Price Items</div><div class="value">${summary.priceItems}</div></div>
-  <div class="card"><div class="label">Stock Models</div><div class="value">${summary.stockModels}</div></div>
-  <div class="card"><div class="label">Total Spots</div><div class="value">${summary.totalSpots}</div></div>
-  <div class="card"><div class="label">Available Spots</div><div class="value">${summary.availableSpots}</div></div>
-  <div class="card"><div class="label">Booked Spots</div><div class="value">${summary.bookedSpots}</div></div>
-  <div class="card"><div class="label">Customers</div><div class="value">${summary.totalCustomers}</div></div>
-  <div class="card"><div class="label">Pending Payments</div><div class="value">${summary.pendingPayments}</div></div>
-  <div class="card"><div class="label">Slips Today</div><div class="value">${summary.slipsReceivedToday}</div></div>
-  <div class="card"><div class="label">Tracking Latest Row</div><div class="value">${summary.trackingLatestRow}</div></div>
-</div>
+      <div class="hero-right">
+        ${
+          campaignImage
+            ? `<img class="campaign-image" src="${campaignImage}" alt="Campaign Image" />`
+            : `<div class="image-placeholder">ยังไม่มีรูปแคมเปญ</div>`
+        }
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <div class="stat-card campaign-title-card">
+        <div class="stat-label">Campaign</div>
+        <div class="stat-value">${campaignTitle}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Campaign Price</div>
+        <div class="stat-value">${campaignPrice} ฿</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Total Spots</div>
+        <div class="stat-value">${summary.totalSpots}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Available Spots</div>
+        <div class="stat-value">${summary.availableSpots}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Booked Spots</div>
+        <div class="stat-value">${summary.bookedSpots}</div>
+      </div>
+    </section>
+
+    ${renderSpotsGrid(summary)}
+
+    <div class="footer-note">
+      Ordinary Campaign Dashboard • Focus view for SPOT booking only
+    </div>
+  </div>
 </body>
 </html>
   `;
 }
-
 // =========================================================
 // MESSAGE HANDLERS
 // =========================================================
