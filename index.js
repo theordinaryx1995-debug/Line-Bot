@@ -326,15 +326,8 @@ function formatThaiDateLong(date = new Date()) {
     "ธันวาคม"
   ];
 
-  const d = new Date(
-    date.toLocaleString("en-US", { timeZone: "Asia/Bangkok" })
-  );
-
-  const day = d.getDate();
-  const month = months[d.getMonth()];
-  const year = d.getFullYear();
-
-  return `${day} ${month} ${year}`;
+  const d = new Date(date.toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 // =========================================================
@@ -573,12 +566,8 @@ async function loadSpotSheet(forceRefresh = false) {
   }
 
   spots.sort((a, b) => {
-    const aNum = Number.isNaN(a.sortNumber)
-      ? Number.MAX_SAFE_INTEGER
-      : a.sortNumber;
-    const bNum = Number.isNaN(b.sortNumber)
-      ? Number.MAX_SAFE_INTEGER
-      : b.sortNumber;
+    const aNum = Number.isNaN(a.sortNumber) ? Number.MAX_SAFE_INTEGER : a.sortNumber;
+    const bNum = Number.isNaN(b.sortNumber) ? Number.MAX_SAFE_INTEGER : b.sortNumber;
     return aNum - bNum;
   });
 
@@ -655,11 +644,7 @@ async function loadRecentSlipMessageIds(forceRefresh = false) {
     if (match?.[1]) ids.add(match[1]);
   }
 
-  cache.slipIds = {
-    data: ids,
-    fetchedAt: Date.now()
-  };
-
+  cache.slipIds = { data: ids, fetchedAt: Date.now() };
   return ids;
 }
 
@@ -672,7 +657,6 @@ async function loadLatestTrackingImage(forceRefresh = false) {
   const rows = await getSheetValues(`${CONFIG.TRACKING_SHEET_NAME}!A:A`);
 
   let latest = null;
-
   for (let i = rows.length - 1; i >= 1; i--) {
     const value = String(rows[i]?.[0] || "").trim();
     if (!value) continue;
@@ -684,11 +668,7 @@ async function loadLatestTrackingImage(forceRefresh = false) {
     break;
   }
 
-  cache.trackingLatest = {
-    data: latest,
-    fetchedAt: Date.now()
-  };
-
+  cache.trackingLatest = { data: latest, fetchedAt: Date.now() };
   return latest;
 }
 
@@ -869,7 +849,6 @@ function buildPriceList(table) {
     const item = table[code];
     const packText = item.pack == null ? "-" : `${formatBaht(item.pack)} บาท`;
     const boxText = item.box == null ? "-" : `${formatBaht(item.box)} บาท`;
-
     lines.push(`${displayCode(code)} | ซอง ${packText} | กล่อง ${boxText}`);
   }
 
@@ -918,7 +897,6 @@ function buildBookedSpotsText(spots) {
   }
 
   const lines = ["📌 รายชื่อผู้จองก่อนหน้า"];
-
   for (const spot of booked) {
     lines.push(`สปอต ${spot.spotNumber}: ${spot.name}`);
   }
@@ -934,7 +912,6 @@ function buildAllBookedSpotsText(spots) {
   }
 
   const lines = ["📌 รายชื่อผู้จองทั้งหมด"];
-
   for (const spot of booked) {
     const status = spot.paymentStatus ? ` (${spot.paymentStatus})` : "";
     lines.push(`สปอต ${spot.spotNumber}: ${spot.name}${status}`);
@@ -956,10 +933,7 @@ function buildBankText(extra = "") {
     "✨ ชำระแล้วโปรดแปะ Pay Slip การโอนทุกครั้ง ✨"
   ];
 
-  if (extra) {
-    parts.push("", extra);
-  }
-
+  if (extra) parts.push("", extra);
   return parts.join("\n");
 }
 
@@ -1013,11 +987,7 @@ function parseAddressTemplate(text) {
     return null;
   }
 
-  return {
-    recipient,
-    phone,
-    address
-  };
+  return { recipient, phone, address };
 }
 
 function formatAddressBlock(addressData) {
@@ -1040,24 +1010,17 @@ function parseSpotNumbers(text) {
   const numbers = [];
 
   for (const part of parts) {
-    if (!/^\d+$/.test(part)) {
-      return null;
-    }
+    if (!/^\d+$/.test(part)) return null;
 
     const num = Number(part);
-
-    if (!Number.isInteger(num) || num <= 0) {
-      return null;
-    }
+    if (!Number.isInteger(num) || num <= 0) return null;
 
     numbers.push(String(num));
   }
 
   const unique = [...new Set(numbers)];
   if (unique.length > CONFIG.MAX_SPOTS_PER_BOOKING) {
-    return {
-      error: `จองได้สูงสุด ${CONFIG.MAX_SPOTS_PER_BOOKING} สปอตต่อครั้ง`
-    };
+    return { error: `จองได้สูงสุด ${CONFIG.MAX_SPOTS_PER_BOOKING} สปอตต่อครั้ง` };
   }
 
   return { values: unique };
@@ -1117,10 +1080,7 @@ async function calculateOrder(text) {
   if (!clean) return null;
 
   if (clean === "รวมราคา") {
-    return {
-      status: "guide",
-      message: getOrderGuideText()
-    };
+    return { status: "guide", message: getOrderGuideText() };
   }
 
   clean = clean.replace(/^รวมราคา/i, "").trim();
@@ -1144,7 +1104,6 @@ async function calculateOrder(text) {
     }
 
     const unitPrice = priceData[item.unit];
-
     if (unitPrice == null) {
       lines.push(`${displayCode(item.code)} ❌ ไม่มีราคาประเภท${displayUnit(item.unit)}`);
       continue;
@@ -1154,9 +1113,8 @@ async function calculateOrder(text) {
     total += sum;
     valid += 1;
 
-    const detailText = `${displayCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(
-      unitPrice
-    )} x${item.qty} = ${formatBaht(sum)} บาท`;
+    const detailText =
+      `${displayCode(item.code)} ${displayUnit(item.unit)}ละ ${formatBaht(unitPrice)} x${item.qty} = ${formatBaht(sum)} บาท`;
 
     lines.push(detailText);
     detailLines.push({
@@ -1170,10 +1128,7 @@ async function calculateOrder(text) {
   }
 
   if (valid === 0) {
-    return {
-      status: "invalid",
-      message: "พิมพ์เช่น OP13 2 ซอง OP15 1 box"
-    };
+    return { status: "invalid", message: "พิมพ์เช่น OP13 2 ซอง OP15 1 box" };
   }
 
   lines.push("━━━━━━━━━━");
@@ -1193,17 +1148,11 @@ async function buildOrderPaymentMessages(userId, originalText) {
   if (!result) return null;
 
   if (result.status === "guide") {
-    return {
-      handled: true,
-      messages: [{ type: "text", text: result.message }]
-    };
+    return { handled: true, messages: [{ type: "text", text: result.message }] };
   }
 
   if (result.status === "invalid") {
-    return {
-      handled: true,
-      messages: [{ type: "text", text: result.message }]
-    };
+    return { handled: true, messages: [{ type: "text", text: result.message }] };
   }
 
   const displayName = await getDisplayName(userId);
@@ -1225,10 +1174,7 @@ ${getAddressTemplateText()}`
       ],
       state: {
         mode: "address_create",
-        data: {
-          origin: "order",
-          originalText
-        }
+        data: { origin: "order", originalText }
       }
     };
   }
@@ -1263,10 +1209,7 @@ ${getAddressTemplateText()}`
     spotNumbers: "",
     slipStatus: "รอส่งสลิป",
     slipUrl: "",
-    note: buildNote({
-      action: "payment_pending_created",
-      paymentRef
-    })
+    note: buildNote({ action: "payment_pending_created", paymentRef })
   });
 
   return {
@@ -1316,11 +1259,7 @@ async function validateSpecificSpots(spotNumbers) {
     validSpots.push(spot);
   }
 
-  return {
-    invalidSpots,
-    occupiedSpots,
-    validSpots
-  };
+  return { invalidSpots, occupiedSpots, validSpots };
 }
 
 async function enqueueBooking(task) {
@@ -1335,24 +1274,15 @@ async function reserveSpecificSpots({ spotNumbers, displayName }) {
       await validateSpecificSpots(spotNumbers);
 
     if (invalidSpots.length > 0) {
-      return {
-        ok: false,
-        message: `ไม่พบหมายเลขสปอต: ${invalidSpots.join(", ")}`
-      };
+      return { ok: false, message: `ไม่พบหมายเลขสปอต: ${invalidSpots.join(", ")}` };
     }
 
     if (occupiedSpots.length > 0) {
-      return {
-        ok: false,
-        message: `สปอตต่อไปนี้ถูกจองแล้ว: ${occupiedSpots.join(", ")}`
-      };
+      return { ok: false, message: `สปอตต่อไปนี้ถูกจองแล้ว: ${occupiedSpots.join(", ")}` };
     }
 
     if (validSpots.length === 0) {
-      return {
-        ok: false,
-        message: "ไม่พบสปอตที่จองได้"
-      };
+      return { ok: false, message: "ไม่พบสปอตที่จองได้" };
     }
 
     const updates = [];
@@ -1398,13 +1328,10 @@ async function markSpecificSpotsSlipSent(spotNumbersText) {
     }
   }
 
-  if (updates.length === 0) {
-    return { ok: false };
-  }
+  if (updates.length === 0) return { ok: false };
 
   await batchUpdateSheetValues(updates);
   await loadSpotSheet(true);
-
   return { ok: true };
 }
 
@@ -1428,9 +1355,7 @@ ${getAddressTemplateText()}`
       ],
       state: {
         mode: "address_create",
-        data: {
-          origin: "spot_booking"
-        }
+        data: { origin: "spot_booking" }
       }
     };
   }
@@ -1454,31 +1379,16 @@ ${getAddressTemplateText()}`
     });
   }
 
-  messages.push({
-    type: "text",
-    text: `🎯 ตอนนี้มีสปอตว่าง ${availableCount} สปอต`
-  });
-
-  messages.push({
-    type: "text",
-    text: bookedText
-  });
+  messages.push({ type: "text", text: `🎯 ตอนนี้มีสปอตว่าง ${availableCount} สปอต` });
+  messages.push({ type: "text", text: bookedText });
 
   if (availableCount <= 0) {
-    return {
-      handled: true,
-      messages: [...messages, { type: "text", text: "สปอตเต็ม" }]
-    };
+    return { handled: true, messages: [...messages, { type: "text", text: "สปอตเต็ม" }] };
   }
 
-  return {
-    handled: true,
-    messages: [...messages, { type: "text", text: getSpotSelectionPromptText() }],
-    state: {
-      mode: "spot_booking",
-      data: {}
-    }
-  };
+  messages.push({ type: "text", text: getSpotSelectionPromptText() });
+
+  return { handled: true, messages };
 }
 
 // =========================================================
@@ -1488,12 +1398,7 @@ async function buildTrackingMessages() {
   const latest = await loadLatestTrackingImage(true);
 
   if (!latest || !latest.imageUrl) {
-    return [
-      {
-        type: "text",
-        text: "ยังไม่พบข้อมูลพัสดุในระบบ กรุณาติดต่อร้าน"
-      }
-    ];
+    return [{ type: "text", text: "ยังไม่พบข้อมูลพัสดุในระบบ กรุณาติดต่อร้าน" }];
   }
 
   const dateText = formatThaiDateLong(new Date());
@@ -1524,9 +1429,7 @@ async function isDuplicateSlipMessageId(messageId) {
   if (!messageId) return false;
 
   const memExpiresAt = recentSlipMessageIds.get(messageId);
-  if (memExpiresAt && memExpiresAt > Date.now()) {
-    return true;
-  }
+  if (memExpiresAt && memExpiresAt > Date.now()) return true;
 
   const logged = await loadRecentSlipMessageIds();
   return logged.has(messageId);
@@ -1540,6 +1443,73 @@ function markRecentSlipMessageId(messageId) {
 // =========================================================
 // ADMIN DASHBOARD
 // =========================================================
+async function getAdminSummary() {
+  const [spots, campaign] = await Promise.all([
+    loadSpotSheet(true),
+    loadCampaign(true)
+  ]);
+
+  const sortedSpots = [...spots].sort(
+    (a, b) => Number(a.spotNumber) - Number(b.spotNumber)
+  );
+
+  return {
+    serviceTime: nowISO(),
+    campaign,
+    totalSpots: sortedSpots.length,
+    availableSpots: sortedSpots.filter((x) => !x.name).length,
+    bookedSpots: sortedSpots.filter((x) => x.name).length,
+    spots: sortedSpots.map((spot) => ({
+      number: spot.spotNumber,
+      name: spot.name || "",
+      paymentStatus: spot.paymentStatus || ""
+    }))
+  };
+}
+
+function renderSpotsGrid(summary) {
+  const spots = Array.isArray(summary?.spots) ? summary.spots : [];
+
+  if (spots.length === 0) {
+    return `
+      <section class="spot-board">
+        <div class="section-head">
+          <h2>SPOT Status</h2>
+          <p>ยังไม่พบข้อมูลสปอต</p>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="spot-board">
+      <div class="section-head">
+        <h2>SPOT Status</h2>
+        <p>ตรวจสอบรายชื่อผู้จองแต่ละช่องได้แบบเรียลไทม์</p>
+      </div>
+
+      <div class="spot-grid">
+        ${spots
+          .map((spot) => {
+            const isFilled = !!spot.name;
+            return `
+              <div class="spot-card ${isFilled ? "filled" : "empty"}">
+                <div class="spot-no">SPOT ${spot.number}</div>
+                <div class="spot-name">${spot.name || "ว่าง"}</div>
+                ${
+                  isFilled && spot.paymentStatus
+                    ? `<div class="spot-status">${spot.paymentStatus}</div>`
+                    : `<div class="spot-status empty-status">พร้อมจอง</div>`
+                }
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderAdminHtml(summary) {
   const campaignTitle = summary?.campaign?.title || "-";
   const campaignPrice = formatBaht(summary?.campaign?.price || 0);
@@ -1553,9 +1523,7 @@ function renderAdminHtml(summary) {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>ระบบการจอง SPOT TCG Ordinary</title>
 <style>
-  * {
-    box-sizing: border-box;
-  }
+  * { box-sizing: border-box; }
 
   body {
     margin: 0;
@@ -1571,70 +1539,70 @@ function renderAdminHtml(summary) {
   .container {
     max-width: 1440px;
     margin: 0 auto;
-    padding: 28px;
+    padding: 20px;
   }
 
   .hero {
     display: grid;
     grid-template-columns: 1.2fr 0.9fr;
-    gap: 24px;
+    gap: 18px;
     align-items: stretch;
-    margin-bottom: 24px;
+    margin-bottom: 18px;
   }
 
   .hero-left {
     background: rgba(255,255,255,0.82);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(255,255,255,0.7);
-    border-radius: 28px;
-    padding: 28px;
+    border-radius: 24px;
+    padding: 18px;
     box-shadow: 0 20px 50px rgba(15, 23, 42, 0.10);
   }
 
   .hero-badge {
     display: inline-block;
-    padding: 8px 14px;
+    padding: 6px 12px;
     border-radius: 999px;
     background: linear-gradient(135deg, #111827, #374151);
     color: #fff;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.3px;
-    margin-bottom: 14px;
+    margin-bottom: 10px;
   }
 
   .hero-title {
     margin: 0;
-    font-size: 42px;
-    line-height: 1.08;
+    font-size: 28px;
+    line-height: 1.12;
     font-weight: 800;
     color: #0f172a;
   }
 
   .hero-subtitle {
-    margin: 14px 0 0;
-    font-size: 16px;
-    line-height: 1.7;
+    margin: 10px 0 0;
+    font-size: 14px;
+    line-height: 1.65;
     color: #475569;
   }
 
   .updated {
-    margin-top: 18px;
-    font-size: 13px;
+    margin-top: 12px;
+    font-size: 12px;
     color: #64748b;
   }
 
   .refresh-box {
-    margin-top: 16px;
+    margin-top: 12px;
     display: inline-flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     background: #eff6ff;
     color: #1d4ed8;
     border: 1px solid #bfdbfe;
     border-radius: 999px;
-    padding: 8px 14px;
-    font-size: 13px;
+    padding: 6px 10px;
+    font-size: 12px;
     font-weight: 700;
   }
 
@@ -1642,46 +1610,46 @@ function renderAdminHtml(summary) {
     background: rgba(255,255,255,0.82);
     backdrop-filter: blur(10px);
     border: 1px solid rgba(255,255,255,0.7);
-    border-radius: 28px;
-    padding: 18px;
+    border-radius: 24px;
+    padding: 14px;
     box-shadow: 0 20px 50px rgba(15, 23, 42, 0.10);
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 320px;
+    min-height: 220px;
     overflow: hidden;
   }
 
   .campaign-image {
     width: 100%;
     height: 100%;
-    min-height: 280px;
+    min-height: 180px;
     object-fit: cover;
-    border-radius: 22px;
+    border-radius: 18px;
     display: block;
     box-shadow: 0 10px 30px rgba(15, 23, 42, 0.14);
   }
 
   .image-placeholder {
     width: 100%;
-    min-height: 280px;
-    border-radius: 22px;
+    min-height: 180px;
+    border-radius: 18px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: linear-gradient(135deg, #e2e8f0, #f8fafc);
     color: #64748b;
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 700;
     text-align: center;
-    padding: 24px;
+    padding: 20px;
   }
 
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(5, minmax(200px, 1fr));
-    gap: 18px;
-    margin-bottom: 28px;
+    grid-template-columns: repeat(5, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 20px;
   }
 
   .stat-card {
@@ -1689,8 +1657,8 @@ function renderAdminHtml(summary) {
     overflow: hidden;
     background: rgba(255,255,255,0.88);
     border: 1px solid rgba(255,255,255,0.7);
-    border-radius: 24px;
-    padding: 22px;
+    border-radius: 20px;
+    padding: 18px;
     box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
   }
 
@@ -1698,8 +1666,8 @@ function renderAdminHtml(summary) {
     content: "";
     position: absolute;
     inset: auto -30px -30px auto;
-    width: 110px;
-    height: 110px;
+    width: 100px;
+    height: 100px;
     border-radius: 50%;
     background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(139,92,246,0.10));
   }
@@ -1707,56 +1675,56 @@ function renderAdminHtml(summary) {
   .stat-label {
     position: relative;
     z-index: 1;
-    font-size: 14px;
+    font-size: 13px;
     color: #64748b;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     font-weight: 600;
   }
 
   .stat-value {
     position: relative;
     z-index: 1;
-    font-size: 38px;
-    line-height: 1;
+    font-size: 32px;
+    line-height: 1.1;
     font-weight: 800;
     color: #0f172a;
     word-break: break-word;
   }
 
   .campaign-title-card .stat-value {
-    font-size: 28px;
-    line-height: 1.25;
+    font-size: 22px;
+    line-height: 1.3;
   }
 
   .spot-board {
     background: rgba(255,255,255,0.88);
     border: 1px solid rgba(255,255,255,0.7);
-    border-radius: 28px;
-    padding: 24px;
+    border-radius: 24px;
+    padding: 20px;
     box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
   }
 
   .section-head h2 {
     margin: 0 0 8px;
-    font-size: 28px;
+    font-size: 24px;
     color: #0f172a;
   }
 
   .section-head p {
-    margin: 0 0 18px;
+    margin: 0 0 16px;
     color: #64748b;
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .spot-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
   }
 
   .spot-card {
-    border-radius: 20px;
-    padding: 18px 14px;
+    border-radius: 18px;
+    padding: 16px 12px;
     text-align: center;
     box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
     border: 1px solid transparent;
@@ -1773,7 +1741,7 @@ function renderAdminHtml(summary) {
   }
 
   .spot-no {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.4px;
     color: #475569;
@@ -1781,25 +1749,25 @@ function renderAdminHtml(summary) {
   }
 
   .spot-name {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 800;
     color: #0f172a;
     line-height: 1.25;
     word-break: break-word;
-    min-height: 54px;
+    min-height: 48px;
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
   .spot-status {
-    margin-top: 10px;
-    font-size: 12px;
+    margin-top: 8px;
+    font-size: 11px;
     font-weight: 700;
     color: #334155;
     background: rgba(255,255,255,0.7);
     border-radius: 999px;
-    padding: 6px 10px;
+    padding: 5px 9px;
     display: inline-block;
   }
 
@@ -1809,8 +1777,8 @@ function renderAdminHtml(summary) {
   }
 
   .footer-note {
-    margin-top: 18px;
-    font-size: 13px;
+    margin-top: 14px;
+    font-size: 12px;
     color: #64748b;
   }
 
@@ -1826,13 +1794,13 @@ function renderAdminHtml(summary) {
     }
 
     .hero-title {
-      font-size: 34px;
+      font-size: 24px;
     }
   }
 
   @media (max-width: 640px) {
     .container {
-      padding: 16px;
+      padding: 14px;
     }
 
     .stats-grid {
@@ -1840,15 +1808,15 @@ function renderAdminHtml(summary) {
     }
 
     .hero-title {
-      font-size: 28px;
+      font-size: 22px;
     }
 
     .stat-value {
-      font-size: 32px;
+      font-size: 28px;
     }
 
     .campaign-title-card .stat-value {
-      font-size: 24px;
+      font-size: 20px;
     }
 
     .spot-grid {
@@ -1856,8 +1824,8 @@ function renderAdminHtml(summary) {
     }
 
     .spot-name {
-      font-size: 18px;
-      min-height: 48px;
+      font-size: 16px;
+      min-height: 42px;
     }
   }
 </style>
@@ -1926,20 +1894,15 @@ function renderAdminHtml(summary) {
 
     setInterval(() => {
       seconds -= 1;
-
-      if (countdownEl) {
-        countdownEl.textContent = seconds;
-      }
-
-      if (seconds <= 0) {
-        window.location.reload();
-      }
+      if (countdownEl) countdownEl.textContent = seconds;
+      if (seconds <= 0) window.location.reload();
     }, 1000);
   </script>
 </body>
 </html>
   `;
 }
+
 // =========================================================
 // MESSAGE HANDLERS
 // =========================================================
@@ -2054,10 +2017,6 @@ ${addressBlock}`
       }
     ];
 
-    if (spotStart?.state?.mode) {
-      setSessionState(userId, spotStart.state.mode, spotStart.state.data || {});
-    }
-
     if (spotStart?.messages?.length) {
       messages.push(...spotStart.messages);
     }
@@ -2088,7 +2047,7 @@ ${addressBlock}`
 async function handleSpotBookingStart(replyToken, userId) {
   const result = await buildSpotBookingStartMessages(userId);
 
-  if (result?.state?.mode) {
+  if (result?.requiresAddress && result?.state?.mode) {
     setSessionState(userId, result.state.mode, result.state.data || {});
   }
 
@@ -2096,12 +2055,6 @@ async function handleSpotBookingStart(replyToken, userId) {
 }
 
 async function handleSpotBookingSelection(replyToken, userId, text) {
-  if (text.trim() === "ยกเลิก") {
-    clearSessionState(userId);
-    await reply(replyToken, [{ type: "text", text: "ยกเลิกการจองสปอตแล้ว" }]);
-    return;
-  }
-
   const parsed = parseSpotNumbers(text);
 
   if (!parsed || !parsed.values) {
@@ -2124,132 +2077,62 @@ async function handleSpotBookingSelection(replyToken, userId, text) {
   const customer = await getOrCreateCustomer(userId, displayName);
   const campaign = await loadCampaign(true);
 
-  const validation = await validateSpecificSpots(parsed.values);
+  if (!customer.shippingAddress) {
+    setSessionState(userId, "address_create", {
+      origin: "spot_booking",
+      selectedSpots: parsed.values
+    });
 
-  if (validation.invalidSpots.length > 0) {
     await reply(replyToken, [
       {
         type: "text",
-        text: `ไม่พบหมายเลขสปอต: ${validation.invalidSpots.join(", ")}`
+        text: `ยังไม่พบข้อมูลที่อยู่จัดส่งของคุณ
+
+กรุณาก็อปปี้เทมเพลตด้านล่าง แล้วเพิ่มข้อมูลจัดส่งของคุณให้ครบถ้วน
+
+${getAddressTemplateText()}`
       }
     ]);
     return;
   }
-
-  if (validation.occupiedSpots.length > 0) {
-    await reply(replyToken, [
-      {
-        type: "text",
-        text: `สปอตต่อไปนี้ถูกจองแล้ว: ${validation.occupiedSpots.join(", ")}`
-      }
-    ]);
-    return;
-  }
-
-  const qty = validation.validSpots.length;
-  const total = (campaign.price || 0) * qty;
-
-  setSessionState(userId, "spot_confirm", {
-    spotNumbers: parsed.values,
-    displayName: customer.displayName,
-    customerNo: customer.customerNo,
-    campaignTitle: campaign.title || "รายการจองสปอต",
-    unitPrice: campaign.price || 0,
-    total
-  });
-
-  await reply(replyToken, [
-    {
-      type: "text",
-      text: `คุณต้องการจองสปอต: ${parsed.values.join(", ")} ใช่หรือไม่
-
-พิมพ์:
-ยืนยัน
-หรือ
-ยกเลิก`
-    },
-    {
-      type: "text",
-      text: `🧾 สรุปก่อนยืนยัน
-${campaign.title || "รายการจองสปอต"}
-ราคา / สปอต: ${formatBaht(campaign.price)} บาท
-จำนวน: ${qty} สปอต
-รวมทั้งหมด: ${formatBaht(total)} บาท`
-    }
-  ]);
-}
-
-async function handleSpotBookingConfirm(replyToken, userId, text) {
-  const state = getSessionState(userId);
-
-  if (!state || state.mode !== "spot_confirm") {
-    await reply(replyToken, [
-      { type: "text", text: "ไม่พบรายการจองที่รอยืนยัน กรุณาเริ่มใหม่อีกครั้ง" }
-    ]);
-    return;
-  }
-
-  const input = text.trim();
-
-  if (input === "ยกเลิก") {
-    clearSessionState(userId);
-    await reply(replyToken, [{ type: "text", text: "ยกเลิกการจองสปอตแล้ว" }]);
-    return;
-  }
-
-  if (input !== "ยืนยัน") {
-    await reply(replyToken, [{ type: "text", text: "กรุณาพิมพ์ 'ยืนยัน' หรือ 'ยกเลิก'" }]);
-    return;
-  }
-
-  const {
-    spotNumbers,
-    displayName,
-    customerNo,
-    campaignTitle,
-    unitPrice,
-    total
-  } = state.data;
 
   const result = await reserveSpecificSpots({
-    spotNumbers,
-    displayName
+    spotNumbers: parsed.values,
+    displayName: customer.displayName
   });
-
-  clearSessionState(userId);
 
   if (!result.ok) {
     await reply(replyToken, [{ type: "text", text: result.message }]);
     return;
   }
 
+  const qty = result.spots.length;
+  const total = (campaign.price || 0) * qty;
   const paymentRef = makeRef("SPOT");
 
-  if (userId) {
-    setPaymentTracking(userId, {
-      type: "spot_booking",
-      paymentRef,
-      customerNo,
-      userId,
-      displayName,
-      itemName: campaignTitle,
-      detail: "จองสปอตตามหมายเลข",
-      qty: result.spots.length,
-      unitPrice,
-      total,
-      spotNumbers: result.spots.join(", ")
-    });
-  }
+  setPaymentTracking(userId, {
+    type: "spot_booking",
+    paymentRef,
+    customerNo: customer.customerNo,
+    userId,
+    displayName: customer.displayName,
+    itemName: campaign.title || "รายการจองสปอต",
+    detail: "จองสปอตตามหมายเลข",
+    qty,
+    unitPrice: campaign.price || 0,
+    total,
+    spotNumbers: result.spots.join(", ")
+  });
 
   await appendOrderLog({
     type: "spot_booking",
-    customerNo,
+    customerNo: customer.customerNo,
     userId,
-    displayName,
-    itemName: campaignTitle,
+    displayName: customer.displayName,
+    itemName: campaign.title || "รายการจองสปอต",
     detail: "จองสปอตตามหมายเลข",
-    qty: result.spots.length,
-    unitPrice,
+    qty,
+    unitPrice: campaign.price || 0,
     total,
     spotNumbers: result.spots.join(", "),
     slipStatus: "รอส่งสลิป",
@@ -2264,29 +2147,23 @@ async function handleSpotBookingConfirm(replyToken, userId, text) {
     {
       type: "text",
       text: `✅ จองสำเร็จ
-ชื่อ: ${displayName}
-รหัสลูกค้า: ${customerNo}
+ชื่อ: ${customer.displayName}
+รหัสลูกค้า: ${customer.customerNo}
 หมายเลขสปอต: ${result.spots.join(", ")}`
     },
-    {
-      type: "text",
-      text: result.allBookedText
-    },
+    { type: "text", text: result.allBookedText },
     {
       type: "image",
       originalContentUrl: CONFIG.PAYMENT_IMAGE_URL,
       previewImageUrl: CONFIG.PAYMENT_IMAGE_URL
     },
-    {
-      type: "text",
-      text: buildBankText("")
-    },
+    { type: "text", text: buildBankText("") },
     {
       type: "text",
       text: `🧾 สรุปยอดชำระ
-${campaignTitle}
-ราคา / สปอต: ${formatBaht(unitPrice)} บาท
-จำนวน: ${result.spots.length} สปอต
+${campaign.title || "รายการจองสปอต"}
+ราคา / สปอต: ${formatBaht(campaign.price || 0)} บาท
+จำนวน: ${qty} สปอต
 รวมทั้งหมด: ${formatBaht(total)} บาท`
     }
   ]);
@@ -2314,10 +2191,7 @@ async function handleSlipImage(replyToken, userId, messageId) {
 
   if (isDuplicate) {
     await reply(replyToken, [
-      {
-        type: "text",
-        text: "สลิปรายการนี้ถูกส่งเข้าระบบแล้ว กรุณารอแอดมินตรวจสอบ"
-      }
+      { type: "text", text: "สลิปรายการนี้ถูกส่งเข้าระบบแล้ว กรุณารอแอดมินตรวจสอบ" }
     ]);
     return;
   }
@@ -2346,12 +2220,7 @@ async function handleSlipImage(replyToken, userId, messageId) {
       })
     });
 
-    await reply(replyToken, [
-      {
-        type: "text",
-        text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ"
-      }
-    ]);
+    await reply(replyToken, [{ type: "text", text: "ได้รับรูปสลิปแล้ว กรุณารอแอดมินตรวจสอบ" }]);
     return;
   }
 
@@ -2402,7 +2271,7 @@ async function handleSlipImage(replyToken, userId, messageId) {
 }
 
 // =========================================================
-// ADMIN DASHBOARD
+// ROUTES
 // =========================================================
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -2436,10 +2305,7 @@ app.get("/health", async (req, res) => {
     });
   } catch (err) {
     logError("Health check error:", err.message);
-    res.status(500).json({
-      ok: false,
-      error: err.message
-    });
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -2453,7 +2319,7 @@ app.get("/admin", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.status(200).send(renderAdminHtml(summary));
   } catch (err) {
-    logError("Admin page error:", err.message);
+    logError("Admin page error:", err);
     res.status(500).send("Admin dashboard error");
   }
 });
@@ -2472,9 +2338,6 @@ app.get("/admin/api/summary", async (req, res) => {
   }
 });
 
-// =========================================================
-// WEBHOOK
-// =========================================================
 app.post("/webhook", async (req, res) => {
   try {
     const events = req.body?.events || [];
@@ -2502,21 +2365,16 @@ app.post("/webhook", async (req, res) => {
 
         if (currentState?.mode === "address_create") {
           await handleAddressInput(replyToken, userId, text, "address_create");
+
+          const stateAfter = getSessionState(userId);
+          if (!stateAfter && currentState?.data?.origin === "spot_booking" && currentState?.data?.selectedSpots) {
+            await handleSpotBookingSelection(replyToken, userId, currentState.data.selectedSpots.join(","));
+          }
           continue;
         }
 
         if (currentState?.mode === "address_update") {
           await handleAddressInput(replyToken, userId, text, "address_update");
-          continue;
-        }
-
-        if (currentState?.mode === "spot_booking") {
-          await handleSpotBookingSelection(replyToken, userId, text);
-          continue;
-        }
-
-        if (currentState?.mode === "spot_confirm") {
-          await handleSpotBookingConfirm(replyToken, userId, text);
           continue;
         }
 
@@ -2558,12 +2416,18 @@ ${getAddressTemplateText()}`
           continue;
         }
 
+        const spotParsed = parseSpotNumbers(text);
+        if (spotParsed?.values) {
+          await handleSpotBookingSelection(replyToken, userId, text);
+          continue;
+        }
+
         const handled = await handleOrder(replyToken, userId, text);
         if (handled) continue;
 
         // ไม่ตอบ fallback เพื่อให้ลูกค้าคุยกับร้านแบบปกติได้
       } catch (eventErr) {
-        logError("Event handling error:", eventErr.message);
+        logError("Event handling error:", eventErr);
 
         try {
           await appendOrderLog({
@@ -2590,10 +2454,7 @@ ${getAddressTemplateText()}`
 
         try {
           await reply(event.replyToken, [
-            {
-              type: "text",
-              text: "ระบบเกิดข้อผิดพลาดชั่วคราว กรุณาลองใหม่อีกครั้ง"
-            }
+            { type: "text", text: "ระบบเกิดข้อผิดพลาดชั่วคราว กรุณาลองใหม่อีกครั้ง" }
           ]);
         } catch (replyErr) {
           logError("Fallback reply failed:", replyErr.message);
